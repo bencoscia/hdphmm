@@ -4,4 +4,5 @@ API Documentation
 .. autosummary::
    :toctree: autosummary
 
-   hdphmm.canvas
+   hdphmm
+   generate_timeseries

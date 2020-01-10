@@ -1,8 +1,9 @@
 hdphmm
 ==============================
 [//]: # (Badges)
-[![Travis Build Status](https://travis-ci.com/REPLACE_WITH_OWNER_ACCOUNT/hdphmm.svg?branch=master)](https://travis-ci.com/REPLACE_WITH_OWNER_ACCOUNT/hdphmm)
-[![codecov](https://codecov.io/gh/REPLACE_WITH_OWNER_ACCOUNT/hdphmm/branch/master/graph/badge.svg)](https://codecov.io/gh/REPLACE_WITH_OWNER_ACCOUNT/hdphmm/branch/master)
+[![Documentation Status](https://readthedocs.org/projects/hdphmm/badge/?version=latest)](https://hdphmm.readthedocs.io/en/latest/?badge=latest)
+[![Travis Build Status](https://travis-ci.com/bencoscia/hdphmm.svg?branch=master)](https://travis-ci.com/REPLACE_WITH_OWNER_ACCOUNT/hdphmm)
+[![codecov](https://codecov.io/gh/bencoscia/hdphmm/branch/master/graph/badge.svg)](https://codecov.io/gh/bencoscia/hdphmm/branch/master)
 
 Determine latent states in multi-dimensional time series using the hierarchical Dirichlet process hidden Markov model
 

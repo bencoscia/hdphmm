@@ -18,59 +18,6 @@ import pickle
 np.set_printoptions(precision=4, suppress=True)
 
 
-def initialize():
-
-    parser = argparse.ArgumentParser(description='Generate timeseries with different underlying models')
-
-    parser.add_argument('-t', '--traj', type=str, help='Name of trajectory data structure to load.')
-    parser.add_argument('-g', '--gro', type=str, help='Name of gro file associated with traj. Only necessary if using'
-                                                      'a GROMACS trajectory')
-    parser.add_argument('-res', '--residue', type=str, help='Name of residue whose center of mass will be tracked')
-
-    parser.add_argument('-d', '--dim', nargs='+', type=int, help='dimensions of trajectory to use in analysis')
-    parser.add_argument('-obs', '--obstype', default='AR', type=str, help="Model describing observation sequence")
-    parser.add_argument('-r', '--order', default=1, type=int, help='Autoregressive order (number of time lags that '
-                                                                   'yt depends on.')
-    parser.add_argument('-p', '--prior', default='MNIW', type=str, help='Type of prior to use for generating DP '
-                                                                        'parameters')
-    parser.add_argument('-smax', '--max_states', default=20, type=int, help='The max number of states that can be '
-                                                                            'found')
-    parser.add_argument('-niter', '--niterations', default=2000, type=int, help='Number of iterations to perform '
-                                                                                'sampling procedure')
-    parser.add_argument('-load', '--load', action="store_true", help='Load saved arrays from previously run HDPHMM')
-    parser.add_argument('-plot_traj', '--plot_traj', default=0, type=int, help='Number of trajectory to plot. I.e. if '
-                        'there are 4 plots and you want the second plot, pass `-plot_traj 1`')
-
-    ####### Trajectory Generation #######
-    parser.add_argument('-nd', '--ndraws', default=2000, type=int, help='Number of time steps to take')
-    parser.add_argument('-n', '--ntraj', default=4, type=int, help='Number of trajectories to generate')
-    parser.add_argument('-f', '--format', default='mat', type=str, help='Format of data array (mat or npz)')
-    # Define transition matrix. Either provide your own, or let this script generate one
-    parser.add_argument('-T', '--transition_matrix', nargs='+', action='append', type=float, help='Define a transition '
-                        'matrix. If provided, this will be used to determine the number of states. Each row of the '
-                        'transition matrix should be passed with a separate -T flag')
-    parser.add_argument('-s', '--nstates', default=3, type=int, help='Number of states to switch between')
-    parser.add_argument('-slip', '--slip', default=0.01, type=float, help='Determines how frequently things will '
-                        'switch states. A slip of 0 results in a transition matrix with only ones on the diagonal. '
-                        'Higher values of slip will give smaller and smaller ratios of diagonals to the rest.')
-
-    # Autoregressive parameters
-    parser.add_argument('-phis', '--phis', nargs='+', action='append', type=float, help='Define autoregressive'
-                        'coefficients for each state. Coefficients for each state should be passed in order with '
-                        'separate -phis flags. If this is not specified, the coefficients will be randomly generated'
-                        'for you.')
-    # noise parameters
-    parser.add_argument('-stds', '--stds', nargs='+', type=float, help='List of standard deviations of Gaussian white '
-                                                                       'noise for each state.')
-    # phantom state linking
-    parser.add_argument('-l', '--link', action="store_true", help='Link together the independent trajectories with a'
-                                                                  'phantom state in between.')
-    parser.add_argument('-pl', '--phantom_length', default=100, type=int, help='Number of time steps for phantom state '
-                                                                               'linkage')
-
-    return parser
-
-
 class PriorError(Exception):
     """ Raised if invalid prior specified """
 
@@ -95,7 +42,7 @@ class DfError(Exception):
 class InfiniteHMM:
 
     def __init__(self, data, observation_model='AR', prior='MNIW', order=1, max_states=20, dim=None, save_com=True,
-                 load_com=False, gro=None, res=None, difference=True, traj_no=None):
+                 load_com=False, gro=None, res=None, difference=True, traj_no=None, radial=False):
         """
         :param data: trajectories to analyze. If gro is not None, then this should be the name of a GROMACS trajectory \
          file (.xtc or .trr) TODO: describe what goes in this data structure
@@ -108,6 +55,8 @@ class InfiniteHMM:
         :param res: name of residue
         :param save_com: If True and you are loading a GROMACS trajectory, save the center of mass coordinates for \
         quicker loading in future usage
+        :param radial: replace the x and y coordinates of a MD trajectory with a radial coordinate with respect to
+        the pore centers of an HII phase lyotropic liquid crystal membrane.
 
         :type data: str or object
         :type observation_model: str
@@ -117,7 +66,8 @@ class InfiniteHMM:
         :type dim: None, int or list of int
         :type gro: str
         :type res: str
-        :type save_com: True
+        :type save_com: bool
+        :type radial: bool
         """
 
         com = None
@@ -125,7 +75,7 @@ class InfiniteHMM:
             com = load_object(data)
             print('Loaded center-of-mass coordinates')
 
-        if type(dim) is int:  # this takes care of array shape issues
+        if isinstance(dim, int):  # this takes care of array shape issues
             dim = [dim]
 
         self.labels = None
@@ -1127,22 +1077,3 @@ def load_object(filename):
     with open(filename, 'rb') as f:
 
         return pickle.load(f)
-
-
-if __name__ == "__main__":
-
-    args = initialize().parse_args()
-
-    if not args.load:
-
-        hmm = InfiniteHMM(args.traj, gro=args.gro, res=args.residue, observation_model=args.obstype, prior=args.prior,
-                          order=args.order, max_states=args.max_states, dim=args.dim)
-        hmm.inference(args.niterations)
-        file_rw.save_object(hmm, 'hmm.pl')
-        hmm.summarize_results(traj_no=args.plot_traj)  # make it pretty
-
-    else:
-
-        hmm = file_rw.load_object('hmm.pl')
-        hmm.summarize_results(traj_no=args.plot_traj)
-

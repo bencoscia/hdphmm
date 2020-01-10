@@ -1,0 +1,8 @@
+sphinx_rtd_theme
+sphinx_automodapi
+sphinx-argparse
+numpy
+tqdm
+scipy
+matplotlib
+mdtraj

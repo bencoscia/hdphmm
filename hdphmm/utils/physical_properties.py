@@ -9,6 +9,8 @@ import os
 import numpy as np
 import matplotlib.path as mplPath
 from hdphmm.utils import file_rw
+import mdtraj as md
+import tqdm
 
 ions_mw = dict()
 ions_mw['NA'] = 22.99
@@ -313,6 +315,111 @@ class Residue(ReadItp):
                 self.get_vsites()
 
 
+class LC(ReadItp):
+    """A Liquid Crystal monomer has the following attributes which are relevant to building and crosslinking:
+
+    Attributes:
+
+        Description of annotations:
+        "R" : reference atom: This atom defines the pore radius, r. It will be placed r nm from pore center
+        "P" : plane atoms: 3 atoms defining a plane within the monomer which you want to be parallel to the xy plane
+        "L" : line atoms: 2 atoms used to rotate monomers on xy plane so that the line created by line atoms goes
+        through the pore center.
+        "C1" : terminal vinyl carbon on tails. (for cross-linking)
+        "C2" : second to last vinyl carbon on tails (for cross-linking)
+        "B" : carbon atoms making up benzene ring
+
+        name: A string representing the monomer's name.
+        natoms: An integer accounting for the number of atoms in a single monomer.
+        build_mon: Monomer used to build the unit cell
+        images: Number of periodic images to be used in calculations
+        c1_atoms: A list of atoms which will be involved in crosslinking as 'c1' -- See xlink.py
+        c2_atoms: A list of atoms which will be involved in crosslinking as 'c2' -- See xlink.py
+        tails: Number of tails on each monomer
+        residues: A list of the minimum residue names present in a typical structure
+        no_vsites: A string indicating whether there are dummy atoms associated with this monomer.
+
+    Notes:
+        Name of .gro and .itp are assumed to be the same unless otherwise specified. Whatever you pass to this class
+        should be the name of the .gro/.itp file and it will read the annotations and directives
+    """
+
+    def __init__(self, name):
+        """ Get attributes from .itp file in addition to some liquid crystal specific attributes
+
+        :param name: name of .itp file
+        """
+
+        super().__init__(name)
+
+        self.atoms(annotations=True)
+
+        self.name = name
+
+        a = []
+        with open('%s/../top/topologies/%s.gro' % (script_location, name)) as f:
+            for line in f:
+                a.append(line)
+
+        self.t = md.load("%s/../top/topologies/%s.gro" % (script_location, name))
+        self.LC_positions = self.t.xyz[0, :, :]
+        self.LC_names = [a.name for a in self.t.topology.atoms]
+        self.LC_residues = [a.residue.name for a in self.t.topology.atoms]
+
+        # Things ReadItp gets wrong because it doesn't include the ion .itps
+        self.natoms = len(self.LC_names)
+
+        # This has a more predictable order than np.unique and set()
+        self.residues = []
+        self.MW = 0
+        for a in self.t.topology.atoms:
+            element = ''.join([i for i in a.name if not i.isdigit()])  # get rid of number in atom name
+            self.MW += md.element.Element.getBySymbol(element).mass
+            if a.residue.name not in self.residues:
+                self.residues.append(a.residue.name)
+
+        self.full = a
+
+    def get_index(self, name):
+        """
+        Name of atoms whose index you want
+        :param name: name listed in .gro file in 3rd column
+        :return: index (serial) of the atom you want
+        """
+        ndx = -2
+        for i in self.full:
+            ndx += 1
+            if str.strip(i[10:15]) == name:
+                break
+
+        return ndx
+
+
+def center_of_mass(pos, mass_atoms):
+    """ Calculate center of mass of residues over a trajectory
+
+    :param pos: xyz coordinates of atoms
+    :param mass_atoms : mass of atoms in order they appear in pos
+
+    :type pos: np.array (nframes, natoms, 3)
+    :type mass_atoms: list
+
+    :return: center of mass of each residue at each frame
+    """
+
+    nframes = pos.shape[0]
+    natoms = len(mass_atoms)
+
+    com = np.zeros([nframes, pos.shape[1] // natoms, 3])  # track the center of mass of each residue
+
+    for f in range(nframes):
+        for i in range(com.shape[1]):
+            w = (pos[f, i * natoms:(i + 1) * natoms, :].T * mass_atoms).T  # weight each atom in the residue by its mass
+            com[f, i, :] = np.sum(w, axis=0) / sum(mass_atoms)  # sum the coordinates and divide by the mass of the residue
+
+    return com
+
+
 def put_in_box(pt, x_box, y_box, m, angle):
     """
     :param pt: The point to place back in the box
@@ -335,6 +442,38 @@ def put_in_box(pt, x_box, y_box, m, angle):
         pt[0] -= x_box
 
     return pt
+
+
+def radial_distance_spline(spline, com, box):
+    """ Calculate radial distance from pore center based on distance from center of mass to closest z point in spline
+
+    :param spline: coordinates of spline for a single pore and frame
+    :param com: atomic center of mass z-coordinates
+    :param zbox: z box dimension (nm)
+
+    :type spline: np.ndarray [npts_spline, 3]
+    :type com: np.ndarray [n_com, 3]
+    :type zbox: float
+
+    :return: array of distances from pore center
+    """
+
+    edges = np.zeros([spline.shape[0] + 1])
+    edges[1:-1] = ((spline[1:, 2] - spline[:-1, 2]) / 2) + spline[:-1, 2]
+    edges[-1] = box[2, 2]
+
+    com = wrap_box(com, box)
+    # while np.min(com[:, 2]) < 0 or np.max(com[:, 2]) > zbox:  # because cross-linked configurations can extend very far up and down
+    #     com[:, 2] = np.where(com[:, 2] < 0, com[:, 2] + zbox, com[:, 2])
+    #     com[:, 2] = np.where(com[:, 2] > zbox, com[:, 2] - zbox, com[:, 2])
+
+    zbins = np.digitize(com[:, 2], edges)
+
+    # handle niche case where coordinate lies exactly on the upper or lower bound
+    zbins = np.where(zbins == 0, zbins + 1, zbins)
+    zbins = np.where(zbins == edges.size, zbins - 1, zbins)
+
+    return np.linalg.norm(com[:, :2] - spline[zbins - 1, :2], axis=1)
 
 
 def trace_pores(pos, box, npoints, npores=4, progress=True, save=True, savename='spline.pl'):
@@ -445,31 +584,6 @@ def trace_pores(pos, box, npoints, npores=4, progress=True, save=True, savename=
             return centers, bin_centers
 
 
-def center_of_mass(pos, mass_atoms):
-    """ Calculate center of mass of residues over a trajectory
-
-    :param pos: xyz coordinates of atoms
-    :param mass_atoms : mass of atoms in order they appear in pos
-
-    :type pos: np.array (nframes, natoms, 3)
-    :type mass_atoms: list
-
-    :return: center of mass of each residue at each frame
-    """
-
-    nframes = pos.shape[0]
-    natoms = len(mass_atoms)
-
-    com = np.zeros([nframes, pos.shape[1] // natoms, 3])  # track the center of mass of each residue
-
-    for f in range(nframes):
-        for i in range(com.shape[1]):
-            w = (pos[f, i * natoms:(i + 1) * natoms, :].T * mass_atoms).T  # weight each atom in the residue by its mass
-            com[f, i, :] = np.sum(w, axis=0) / sum(mass_atoms)  # sum the coordinates and divide by the mass of the residue
-
-    return com
-
-
 def translate(xyz, before, after):
     """ Translate coordinates based on a reference position
 
@@ -498,3 +612,51 @@ def translate(xyz, before, after):
         pos[i, :] = x[:3]
 
     return pos
+
+
+def wrap_box(positions, box, tol=1e-6):
+    """ Put all atoms in box
+
+    :param positions: xyz atomic position [n_atoms, 3]
+    :param box: box vectors [3, 3] (as obtained from mdtraj t.unitcell_vectors)
+
+    :type positions: np.ndarray
+    :type box: np.ndarray
+
+    :return: positions moved into box
+    """
+
+    xy = positions[:, :2]  # xy coordinates have dependent changes so this makes things neater below
+    z = positions[:, 2]
+
+    xbox, ybox, zbox = box[0, 0], box[1, 1], box[2, 2]
+
+    angle = np.arcsin(ybox / xbox)  # angle between y-box vector and x-box vector in radians
+    m = np.tan(angle)
+    b = - m * xbox  # y intercept of box vector that does not pass through origin (right side of box)
+
+    while max(xy[:, 1]) > ybox or min(xy[:, 1]) < 0:
+        xy[np.where(xy[:, 1] > ybox)[0], :2] -= [xbox*np.cos(angle), ybox]
+        xy[np.where(xy[:, 1] < 0)[0], :2] += [xbox * np.cos(angle), ybox]
+
+    # added tolerance for corner case
+    while len(np.where(xy[:, 0] - (xy[:, 1] / m) < -tol)[0]) > 0 or \
+            len(np.where(xy[:, 0] - ((xy[:, 1] - b) / m) > 0)[0]) > 0:
+        xy[np.where(xy[:, 0] < (xy[:, 1] / m))[0], 0] += xbox
+        xy[np.where(xy[:, 0] > ((xy[:, 1] - b) / m))[0], 0] -= xbox
+
+    # check z coordinates
+    while np.max(z) > zbox or np.min(z) < 0:  # might need to do this multiple times
+        z = np.where(z > zbox, z - zbox, z)
+        z = np.where(z < 0, z + zbox, z)
+
+    return np.concatenate((xy, z[:, np.newaxis]), axis=1)
+
+
+def write_spline_coordinates(pore_centers, frame=0):
+    """ write spline coordinates to a .gro file
+    """
+
+    coordinates = np.reshape(pore_centers[frame, ...], (pore_centers.shape[1] * pore_centers.shape[2], 3))
+    file_rw.write_gro(coordinates, 'spline.gro', name='K')
+

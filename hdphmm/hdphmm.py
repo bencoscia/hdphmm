@@ -31,7 +31,8 @@ class ModelError(Exception):
 class InfiniteHMM:
 
     def __init__(self, data, observation_model='AR', prior='MNIW', order=1, max_states=20, dim=None, save_com=True,
-                 load_com=False, gro=None, res=None, difference=True, traj_no=None, radial=False):
+                 load_com=False, gro=None, res=None, difference=True, traj_no=None, radial=False,
+                 build_monomer='NAcarb11V', first_frame=0, **kwargs):
         """
         :param data: trajectories to analyze. If gro is not None, then this should be the name of a GROMACS trajectory \
          file (.xtc or .trr) TODO: describe what goes in this data structure
@@ -74,7 +75,7 @@ class InfiniteHMM:
             if com is None:
 
                 print("Loading GROMACS trajectory file %s..." % data, end='', flush=True)
-                t = md.load(data, top=gro)
+                t = md.load(data, top=gro)[first_frame:]
                 print("Done!")
 
                 residue = physical_properties.Residue(res)  # get residue attributes
@@ -86,10 +87,21 @@ class InfiniteHMM:
                 print('Calculating center of mass trajectories of residue %s' % residue.name)
                 self.com = physical_properties.center_of_mass(t.xyz[:, ndx, :], mass)  # determine center of mass trajectories
 
+                if radial:
+
+                    try:
+                        sp = kwargs['spline_params']
+                    except KeyError:
+                        sp = {'npts_spline': 10, 'save': True, 'savename': 'spline.pl'}
+
+                    monomer = physical_properties.Residue(build_monomer)  # properties of monomer used to build system
+                    radial_distances = self._get_radial_distances(t, monomer, sp)
+                    self.com = np.concatenate((radial_distances[..., np.newaxis], self.com[..., 2][..., np.newaxis]), 2)
+
                 self.dt = t.time[1] - t.time[0]
 
                 if save_com:
-                    file_rw.save_object((self.com, self.dt), 'com.pl')
+                    file_rw.save_object((self.com, self.dt), 'comr.pl')
                     print('Saved center-of-mass coordinates')
 
             else:
@@ -115,9 +127,10 @@ class InfiniteHMM:
         if traj_no is not None:
 
             if isinstance(traj_no, int):
-                traj_no = [traj_no]
+                traj_no = [traj_no]  # to maintain dimensions of self.trajectories
 
             self.trajectories = self.trajectories[:, traj_no, :]
+            self.com = self.com[:, traj_no, :]
 
         # determine data characteristics
         self.dimensions = self.trajectories.shape[2]
@@ -219,6 +232,28 @@ class InfiniteHMM:
         self.z = np.zeros([self.nsolute, self.nT - self.order], dtype=int)  # will hold estimated states
 
         self.iteration = 0
+
+    def _get_radial_distances(self, t, monomer, spline_params):
+
+        pore_atoms = [a.index for a in t.topology.atoms if a.name in monomer.pore_defining_atoms and
+                      a.residue.name in monomer.residues]
+
+        spline = physical_properties.trace_pores(t.xyz[:, pore_atoms, :], t.unitcell_vectors,
+                      spline_params['npts_spline'], save=spline_params['save'], savename=spline_params['savename'])[0]
+
+        nres = self.com.shape[1]
+        radial_distances = np.zeros([t.n_frames, nres])
+        npores = spline.shape[1]
+        for f in tqdm.tqdm(range(t.n_frames), unit=' Frames'):
+            d = np.zeros([npores, nres])
+            for p in range(npores):
+
+                d[p, :] = physical_properties.radial_distance_spline(spline[f, p, ...], self.com[f, ...],
+                                                                     t.unitcell_vectors[f, ...])
+
+            radial_distances[f, :] = d[np.argmin(d, axis=0), np.arange(nres)]
+
+        return radial_distances
 
     def make_design_matrix(self, observations):
         """ Create an (order*d , T) matrix of shifted observations. For each order create a trajectory shifted an

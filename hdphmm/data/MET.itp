@@ -1,0 +1,46 @@
+; MET_GMX.top created by acpype (Rev: 403) on Tue Nov 13 15:42:33 2018
+
+[ moleculetype ]
+;name            nrexcl
+ MET              3
+
+[ atoms ]
+;   nr  type  resi  res  atom  cgnr     charge      mass       ; qtot   bond_type
+     1   c3     1   MET     C    1     0.116883    12.010000
+     2   oh     1   MET     O    2    -0.598217    16.000000 ; D A
+     3   h1     1   MET     H    3     0.028283     1.008000
+     4   h1     1   MET    H1    4     0.028283     1.008000
+     5   h1     1   MET    H2    5     0.028283     1.008000
+     6   ho     1   MET    H3    6     0.396483     1.008000 ; H
+
+[ bonds ]
+;   ai     aj funct   r             k
+     1      2   1    1.4260e-01    2.6284e+05 ;      C - O     
+     1      3   1    1.0930e-01    2.8108e+05 ;      C - H     
+     1      4   1    1.0930e-01    2.8108e+05 ;      C - H1    
+     1      5   1    1.0930e-01    2.8108e+05 ;      C - H2    
+     2      6   1    9.7400e-02    3.0928e+05 ;      O - H3    
+
+[ pairs ]
+;   ai     aj    funct
+     3      6      1 ;      H - H3    
+     4      6      1 ;     H1 - H3    
+     5      6      1 ;     H2 - H3    
+
+[ angles ]
+;   ai     aj     ak    funct   theta         cth
+     1      2      6      1    1.0816e+02    3.9405e+02 ;      C - O      - H3    
+     2      1      3      1    1.0988e+02    4.2652e+02 ;      O - C      - H     
+     2      1      4      1    1.0988e+02    4.2652e+02 ;      O - C      - H1    
+     2      1      5      1    1.0988e+02    4.2652e+02 ;      O - C      - H2    
+     3      1      4      1    1.0955e+02    3.2786e+02 ;      H - C      - H1    
+     3      1      5      1    1.0955e+02    3.2786e+02 ;      H - C      - H2    
+     4      1      5      1    1.0955e+02    3.2786e+02 ;     H1 - C      - H2    
+
+[ dihedrals ] ; propers
+; treated as RBs in GROMACS to use combine multiple AMBER torsions per quartet
+;    i      j      k      l   func    C0         C1         C2         C3         C4         C5
+     3      1      2      6      3    0.69733    2.09200    0.00000   -2.78933    0.00000    0.00000 ;      H-     C-     O-    H3
+     4      1      2      6      3    0.69733    2.09200    0.00000   -2.78933    0.00000    0.00000 ;     H1-     C-     O-    H3
+     5      1      2      6      3    0.69733    2.09200    0.00000   -2.78933    0.00000    0.00000 ;     H2-     C-     O-    H3
+

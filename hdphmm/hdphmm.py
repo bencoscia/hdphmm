@@ -1,19 +1,15 @@
 # !/usr/bin/env python
 
-import argparse
 import numpy as np
 import mdtraj as md
-from scipy.stats import wishart, norm
-from scipy import io
 import tqdm
 from scipy import sparse
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from itertools import combinations, permutations
-from LLC_Membranes.llclib import file_rw, rand, physical, topology  # TODO: get rid of LLC_Membranes dependency
 from hdphmm import generate_timeseries as gent
-import pickle
+from hdphmm.utils import file_rw, physical_properties, random
 
 np.set_printoptions(precision=4, suppress=True)
 
@@ -27,13 +23,6 @@ class PriorError(Exception):
 
 class ModelError(Exception):
     """ Raised if invalid model specified """
-
-    def __init__(self, message):
-        super().__init__(message)
-
-
-class DfError(Exception):
-    """ Raised if invalid number of degrees of freedom chosen"""
 
     def __init__(self, message):
         super().__init__(message)
@@ -72,7 +61,7 @@ class InfiniteHMM:
 
         com = None
         if load_com:
-            com = load_object(data)
+            com = file_rw.load_object(data)
             print('Loaded center-of-mass coordinates')
 
         if isinstance(dim, int):  # this takes care of array shape issues
@@ -88,14 +77,14 @@ class InfiniteHMM:
                 t = md.load(data, top=gro)
                 print("Done!")
 
-                residue = topology.Residue(res)  # get residue attributes
+                residue = physical_properties.Residue(res)  # get residue attributes
 
                 ndx = [a.index for a in t.topology.atoms if a.residue.name == res]  # index of all residue atoms
                 names = [a.name for a in t.topology.atoms if a.residue.name == res][
                         :residue.natoms]  # names of atoms in one residue
                 mass = [residue.mass[x] for x in names]  # mass of atoms in order that they appear in file
                 print('Calculating center of mass trajectories of residue %s' % residue.name)
-                self.com = physical.center_of_mass(t.xyz[:, ndx, :], mass)  # determine center of mass trajectories
+                self.com = physical_properties.center_of_mass(t.xyz[:, ndx, :], mass)  # determine center of mass trajectories
 
                 self.dt = t.time[1] - t.time[0]
 
@@ -308,9 +297,9 @@ class InfiniteHMM:
             alpha0_p_kappa0 = np.random.gamma(self.a_alpha) / self.b_alpha
             gamma0 = np.random.gamma(self.a_gamma) / self.b_gamma
         else:
-            alpha0_p_kappa0 = gibbs_conparam(alpha0_p_kappa0, Nkdot[validindices], Mkdot[validindices], self.a_alpha,
+            alpha0_p_kappa0 = self.gibbs_conparam(alpha0_p_kappa0, Nkdot[validindices], Mkdot[validindices], self.a_alpha,
                                              self.b_alpha, 50)
-            gamma0 = gibbs_conparam(gamma0, barM.sum(), barK, self.a_gamma, self.b_gamma, 50)
+            gamma0 = self.gibbs_conparam(gamma0, barM.sum(), barK, self.a_gamma, self.b_gamma, 50)
 
         self.hyperparams['gamma0'] = gamma0
 
@@ -320,7 +309,7 @@ class InfiniteHMM:
             if validindices2.size == 0:
                 sigma0 = np.random.gamma(self.a_sigma) / self.b_sigma
             else:
-                sigma0 = gibbs_conparam(sigma0, Nskdot[validindices2], uniqueS[validindices2], self.a_sigma,
+                sigma0 = self.gibbs_conparam(sigma0, Nskdot[validindices2], uniqueS[validindices2], self.a_sigma,
                                         self.b_sigma, 50)
         else:
             sigma0 = 1
@@ -330,7 +319,7 @@ class InfiniteHMM:
             A = self.c + sum_w.sum()
             B = self.d + M.sum() - sum_w.sum()
             # rho0 = np.random.beta(A, B)
-            rho0 = randdirichlet([A, B])[0]
+            rho0 = random.randdirichlet([A, B])[0]
 
         self.hyperparams['alpha0_p_kappa0'] = alpha0_p_kappa0
         self.hyperparams['sigma0'] = sigma0
@@ -354,7 +343,7 @@ class InfiniteHMM:
 
         # Draw beta_vec using Dirichlet process; G0 ~ DP(gamma, H)  H is a uniform base measure
         # self.beta_vec = np.random.dirichlet(self.stateCounts['barM'].sum(axis=0) + gamma0 / self.max_states)  # G0
-        self.beta_vec = randdirichlet(self.stateCounts['barM'].sum(axis=0) + gamma0 / self.max_states)[:, 0]  # REMOVE
+        self.beta_vec = random.randdirichlet(self.stateCounts['barM'].sum(axis=0) + gamma0 / self.max_states)[:, 0]  # REMOVE
 
         N = self.stateCounts['N']
         Ns = self.stateCounts['Ns']
@@ -365,11 +354,11 @@ class InfiniteHMM:
             vec[j] += kappa0  # here is the sticky part. This ends up weighting self-transitions pretty heavily
             # self.pi_z[j, :] = np.random.dirichlet(vec)
             # self.pi_s[j, :] = np.random.dirichlet(Ns[j, :] + sigma0 / self.Ks)
-            self.pi_z[j, :] = randdirichlet(vec)[:, 0]  # REMOVE
-            self.pi_s[j, :] = randdirichlet(Ns[j, :] + sigma0 / self.Ks)[:, 0]  # REMOVE
+            self.pi_z[j, :] = random.randdirichlet(vec)[:, 0]  # REMOVE
+            self.pi_s[j, :] = random.randdirichlet(Ns[j, :] + sigma0 / self.Ks)[:, 0]  # REMOVE
 
         # self.pi_init = np.random.dirichlet(alpha0 * self.beta_vec + N[self.max_states, :])
-        self.pi_init = randdirichlet(alpha0 * self.beta_vec + N[self.max_states, :])[:, 0]  # REMOVE
+        self.pi_init = random.randdirichlet(alpha0 * self.beta_vec + N[self.max_states, :])[:, 0]  # REMOVE
 
     def _sample_theta(self):
         """ reproduction of sample_theta.m
@@ -416,14 +405,14 @@ class InfiniteHMM:
                         Sygx = 0
 
                     # sample inverse wishart distribution to get covariance estimate
-                    sqrtSigma, sqrtinvSigma = randiwishart(Sygx + nu_delta, nu + store_card[kz, ks])
+                    sqrtSigma, sqrtinvSigma = random.randiwishart(Sygx + nu_delta, nu + store_card[kz, ks])
 
                     invSigma[:, :, kz, ks] = sqrtinvSigma.T @ sqrtinvSigma  # I guess sqrtinvSigma is cholesky decomp
 
                     cholinvSxx = np.linalg.cholesky(np.linalg.inv(Sxx)).T  # transposed to match MATLAB
 
                     # sample a matrix normal distribution to get AR parameter estimates
-                    A[:, :, kz, ks] = sample_from_matrix_normal(SyxSxxInv, sqrtSigma, cholinvSxx)
+                    A[:, :, kz, ks] = self.sample_from_matrix_normal(SyxSxxInv, sqrtSigma, cholinvSxx)
 
             self.theta['invSigma'] = invSigma
             self.theta['A'] = A
@@ -583,9 +572,9 @@ class InfiniteHMM:
         # sample M, where M(i, j) = number of tables in restaurant i served dish j
         alpha = self.beta_vec * np.ones([self.max_states, self.max_states]) * alpha0 + kappa0 * np.eye(self.max_states)
         alpha = np.vstack((alpha, alpha0 * self.beta_vec))
-        M = randnumtable(alpha, N)
+        M = self.randnumtable(alpha, N)
 
-        barM, sum_w = sample_barM(M, self.beta_vec, rho0)
+        barM, sum_w = self.sample_barM(M, self.beta_vec, rho0)
 
         self.stateCounts['M'] = M
         self.stateCounts['barM'] = barM
@@ -660,6 +649,116 @@ class InfiniteHMM:
         partial_marg[:, 0] = np.multiply(block_like[:, 0], bwds_msg[:, 0])
 
         return partial_marg
+
+    @staticmethod
+    def sample_from_matrix_normal(M, sqrtV, sqrtinvK):
+        """ reproduction of sampleFromMatrixNormal.m
+
+        :param M:
+        :param sqrtV:
+        :param sqrtinvK:
+        """
+
+        mu = M.flatten(order='F')  # order F caused 1.5 days of debugging
+        sqrtsigma = np.kron(sqrtinvK, sqrtV)
+
+        # S = mu + sqrtsigma.T @ norm.rvs(size=mu.size)
+
+        normald = random.randomnormal(0, 1, mu.size)  # REMOVE
+        S = mu + sqrtsigma.T @ normald  # REMOVE
+
+        return S.reshape(M.shape, order='F')
+
+    @staticmethod
+    def randnumtable(alpha, numdata):
+        """ Reproduction of randnumtable.m
+
+        :param alpha:
+        :param numdata:
+        :return:
+        """
+
+        numtable = np.zeros_like(numdata)
+        for i in range(numdata.shape[1]):
+            for j in range(numdata.shape[0]):
+                if numdata[j, i] > 0:
+                    numtable[j, i] = 1 + sum(np.random.uniform(size=numdata[j, i] - 1) <
+                                             (np.ones([numdata[j, i] - 1]) * alpha[j, i]) / (alpha[j, i] +
+                                                                                             np.arange(1,
+                                                                                                       numdata[j, i])))
+
+        numtable[numdata == 0] = 0
+
+        return numtable
+
+    @staticmethod
+    def sample_barM(M, beta_vec, rho0):
+        """ reproduction of sample_barM.m
+
+        :param M: matrix of random table numbers
+        :param beta_vec: G0 distribution pulled from a dirichlet process
+        :param rho0: hyperparameter
+
+        :type M: np.ndarray
+        :type beta_vec: np.ndarray
+        :type rho0: float
+
+        :return barM
+        :return sum_w
+        """
+
+        barM = np.copy(M)
+        sum_w = np.zeros([M.shape[1]])
+
+        for j in range(M.shape[1]):
+            if rho0 > 0:
+                p = rho0 / (beta_vec[j] * (1 - rho0) + rho0)
+            else:
+                p = 0
+
+            # sum_w[j] = np.random.binomial(M[j, j], p)
+            sum_w[j] = random.randombinomial(M[j, j], p)  # REMOVE
+            barM[j, j] = M[j, j] - sum_w[j]
+
+        return barM, sum_w
+
+    @staticmethod
+    def gibbs_conparam(alpha, numdata, numclass, aa, bb, numiter):
+        """ Auxiliary variable resampling of DP concentration parameter. reproduction of gibbs_conparam.m
+
+        :param alpha:
+        :param numdata:
+        :param numclass:
+        :param aa:
+        :param bb:
+        :param numiter:
+        """
+
+        numgroup = numdata.size
+        totalclass = numclass.sum()
+
+        A = np.zeros([numgroup, 2])
+        A[:, 0] = alpha + 1
+        A[:, 1] = numdata
+
+        for i in range(numiter):
+            # beta auxiliary variables (the beta distribution is the 2D case of the dirichlet distribution)
+            # xj = np.array([np.random.dirichlet(a) for a in A])
+            xj = np.array([random.randdirichlet(a) for a in A])  # REMOVE
+
+            xx = xj[:, 0]
+
+            # binomial auxiliary variables -- debug this if there is an issue. I think this is right though
+            zz = np.less(np.multiply(np.random.uniform(size=numgroup), alpha + numdata), numdata)
+
+            gammaa = aa + totalclass - sum(zz)
+
+            gammab = bb - sum(np.log(xx))
+
+            # alpha = np.random.gamma(gammaa) / gammab
+            alpha = (random.randomgamma(gammaa) / gammab)[0, 0]  # REMOVE
+
+        return alpha
 
     def summarize_results(self, cmap=plt.cm.jet, traj_no=0, plot_dim='all'):
         """ Plot estimated state sequence. If true labels exist, compare those.
@@ -801,11 +900,11 @@ class InfiniteHMM:
         if self.labels is not None:
             ax_estimated.set_title('Estimated State Sequence', fontsize=16)
             ax_estimated.set_xlim([0, nT * self.dt])
-            ymin = self.com[:, traj_no, 0].min()
+            ymin = self.trajectories[:, traj_no, 0].min()
             if dim > 1:
-                ymax = self.com[:, traj_no, 1:].max() + (dim - 1) * shift
+                ymax = self.trajectories[:, traj_no, 1:].max() + (dim - 1) * shift
             else:
-                ymax = self.com[:, traj_no, 0].max()
+                ymax = self.trajectories[:, traj_no, 0].max()
 
             ax_estimated.set_ylim([ymin, ymax])
             # ax_estimated.set_ylim([self.com[:, traj_no, 2].min(), self.com[:, traj_no, 2].max()])
@@ -887,193 +986,3 @@ def multicolored_line_collection(x, y, z, colors):
     lc.set_linewidth(2)
 
     return lc
-
-
-def randiwishart(sigma, df):
-    """ Generate an inverse Wishart random matrix in the form consistent with randiwishart.m
-
-    :param sigma: covariance matrix (n x n)
-    :param df: degrees of freedom. Must be greater than n (dimension of sigma)
-
-    :type sigma: np.ndarray
-    :type df: int
-
-    :return: sqrtinvx
-    :return: sqrtx
-    """
-
-    n = sigma.shape[0]
-    if df < n:
-        raise DfError('df < n. Please add degrees of freedom')
-
-    d = np.linalg.cholesky(sigma)  # the output is the transpose of MATLAB's chol function
-    di = np.linalg.inv(d)  # so no need to take transpose of d here
-
-    # a = randwishart(df/2, n)
-    a = rand.randomwishart(df / 2, n)  # REMOVE
-
-    sqrtinvx = (np.sqrt(2) * a) @ di
-    sqrtx = np.linalg.inv(sqrtinvx).T
-
-    return sqrtx, sqrtinvx
-
-
-def sample_from_matrix_normal(M, sqrtV, sqrtinvK):
-    """ reproduction of sampleFromMatrixNormal.m
-
-    :param M:
-    :param sqrtV:
-    :param sqrtinvK:
-    """
-
-    mu = M.flatten(order='F')  # order F caused 1.5 days of debugging
-    sqrtsigma = np.kron(sqrtinvK, sqrtV)
-
-    # S = mu + sqrtsigma.T @ norm.rvs(size=mu.size)
-
-    normald = rand.randomnormal(0, 1, mu.size)  # REMOVE
-    S = mu + sqrtsigma.T @ normald  # REMOVE
-
-    return S.reshape(M.shape, order='F')
-
-
-def randnumtable(alpha, numdata):
-    """ Reproduction of randnumtable.m
-
-    :param alpha:
-    :param numdata:
-    :return:
-    """
-
-    numtable = np.zeros_like(numdata)
-    for i in range(numdata.shape[1]):
-        for j in range(numdata.shape[0]):
-            if numdata[j, i] > 0:
-                numtable[j, i] = 1 + sum(np.random.uniform(size=numdata[j, i] - 1) <
-                                         (np.ones([numdata[j, i] - 1]) * alpha[j, i]) / (alpha[j, i] +
-                                                                                         np.arange(1, numdata[j, i])))
-
-    numtable[numdata == 0] = 0
-
-    return numtable
-
-
-def sample_barM(M, beta_vec, rho0):
-    """ reproduction of sample_barM.m
-
-    :param M: matrix of random table numbers
-    :param beta_vec: G0 distribution pulled from a dirichlet process
-    :param rho0: hyperparameter
-
-    :type M: np.ndarray
-    :type beta_vec: np.ndarray
-    :type rho0: float
-
-    :return barM
-    :return sum_w
-    """
-
-    barM = np.copy(M)
-    sum_w = np.zeros([M.shape[1]])
-
-    for j in range(M.shape[1]):
-        if rho0 > 0:
-            p = rho0 / (beta_vec[j] * (1 - rho0) + rho0)
-        else:
-            p = 0
-
-        # sum_w[j] = np.random.binomial(M[j, j], p)
-        sum_w[j] = rand.randombinomial(M[j, j], p)  # REMOVE
-        barM[j, j] = M[j, j] - sum_w[j]
-
-    return barM, sum_w
-
-
-def gibbs_conparam(alpha, numdata, numclass, aa, bb, numiter):
-    """ Auxiliary variable resampling of DP concentration parameter. reproduction of gibbs_conparam.m
-
-    :param alpha:
-    :param numdata:
-    :param numclass:
-    :param aa:
-    :param bb:
-    :param numiter:
-    """
-
-    numgroup = numdata.size
-    totalclass = numclass.sum()
-
-    A = np.zeros([numgroup, 2])
-    A[:, 0] = alpha + 1
-    A[:, 1] = numdata
-
-    for i in range(numiter):
-        # beta auxiliary variables (the beta distribution is the 2D case of the dirichlet distribution)
-        # xj = np.array([np.random.dirichlet(a) for a in A])
-        xj = np.array([randdirichlet(a) for a in A])  # REMOVE
-
-        xx = xj[:, 0]
-
-        # binomial auxiliary variables -- debug this if there is an issue. I think this is right though
-        zz = np.less(np.multiply(np.random.uniform(size=numgroup), alpha + numdata), numdata)
-
-        gammaa = aa + totalclass - sum(zz)
-
-        gammab = bb - sum(np.log(xx))
-
-        # alpha = np.random.gamma(gammaa) / gammab
-        alpha = (rand.randomgamma(gammaa) / gammab)[0, 0]  # REMOVE
-
-    return alpha
-
-
-def randwishart(a, d):
-    """ Implementation of randwishart.m in lightspeed toolbox. I think this is a wrong implementation but this is what
-    is used
-
-    :param a: degrees of freedom
-    :param d: dimension of output matrix
-
-    :type a: float
-    :type d: int
-    """
-
-    sqrth = np.sqrt(0.5)
-    cholX = sqrth * np.triu(np.random.normal(size=(d, d)))
-    i = np.arange(0, d)
-    diag = [np.sqrt(np.random.gamma(g)) for g in a - i * 0.5]
-    for i in range(d):
-        cholX[i, i] = diag[i]
-
-    return cholX
-
-
-def randdirichlet(a):
-    """ Python implementation of randdirichlet.m using randomgamma fucnction
-
-    :param a: vector of weights (shape parameters to the gamma distribution)
-    """
-
-    try:
-        x = rand.randomgamma(a)
-    except ValueError:
-        a[a == 0] += 1e-16
-        x = rand.randomgamma(a)
-
-    x /= x.sum(axis=0)
-
-    return x
-
-
-def save_object(obj, filename):
-
-    with open(filename, 'wb') as output:  # Overwrites any existing file.
-
-        pickle.dump(obj, output, pickle.HIGHEST_PROTOCOL)
-
-
-def load_object(filename):
-
-    with open(filename, 'rb') as f:
-
-        return pickle.load(f)

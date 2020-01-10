@@ -12,7 +12,6 @@ one can generate the same pseudorandom numbers in MATLAB and numpy using these f
 """
 
 import numpy as np
-from LLC_Membranes.llclib import fitting_functions
 import math
 np.set_printoptions(precision=4, suppress=True)
 

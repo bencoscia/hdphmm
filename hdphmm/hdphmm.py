@@ -10,6 +10,7 @@ from matplotlib.colors import ListedColormap, BoundaryNorm
 from itertools import combinations, permutations
 from hdphmm import generate_timeseries as gent
 from hdphmm.utils import file_rw, physical_properties, random
+import pymbar
 
 np.set_printoptions(precision=4, suppress=True)
 
@@ -115,9 +116,13 @@ class InfiniteHMM:
             else:
                 self.trajectories = self.com[..., dim]
 
-        elif isinstance(data, gent.GenData):
+            print(self.trajectories.shape)
+
+        elif isinstance(data, object):#gent.GenARData):
 
             self.trajectories = data.traj
+            # import scipy.io as io
+            # io.savemat('test_traj.mat', dict(traj=self.trajectories))
             self.labels = data.state_sequence
 
             self.actual_T = data.T
@@ -140,8 +145,8 @@ class InfiniteHMM:
         print('Fitting %d %d dimensional trajectories assuming an autoregressive order of %d' %
               (self.nsolute, self.dimensions, order))
 
-        self.observation_model = observation_model  # type of model (AR, Gaussian, SLDS)
-        self.prior = prior  # prior for noise and autoregressive parameters
+        self.observation_model = observation_model  # type of model (AR is the only option currently)
+        self.prior = prior  # prior for noise and autoregressive parameters (MNIW is only option currently)
         self.order = order  # autoregressive order
         self.max_states = max_states  # truncate infinte states possiblites down to something finite
 
@@ -151,10 +156,25 @@ class InfiniteHMM:
         self.m = self.dimensions * self.order
 
         self.prior_params = {}
-        if self.prior == 'MNIW':  # Matrix-normal inverse-wishart prior
+        # MNIW-N: inverse Wishart on(A, Sigma) and normal on mu
+        # MNIW: matrix normal inverse Wishart on (A, Sigma) with mean forced to 0
+        if self.prior == 'MNIW':  # Matrix-normal inverse-wishart prior. Mean forced to zero
+
             self.prior_params['M'] = np.zeros([self.dimensions, self.m])
             self.prior_params['K'] = K[:self.m, :self.m]
+
+        elif self.prior == 'MNIW-N':
+
+            self.sig0 = 5
+
+            self.prior_params['M'] = np.zeros([self.dimensions, self.m])
+            self.prior_params['K'] = K[:self.m, :self.m]
+            self.prior_params['mu0'] = np.zeros(self.dimensions)
+            self.prior_params['cholSigma0'] = np.linalg.cholesky(self.sig0 * np.eye(self.dimensions))
+            self.prior_params['numIter'] = 50
+
         else:
+
             raise PriorError('The prior %s is not implemented' % self.prior)
 
         # stuff to do with prior
@@ -166,7 +186,7 @@ class InfiniteHMM:
         self.b_alpha = 0.01
         self.a_gamma = 1  # global expected # of HMM states (affects \beta) -- TODO: play with this
         self.b_gamma = 0.01
-        if self.Ks > 1:  # i think this only applies to SLDS
+        if self.Ks > 1:  # I think this only applies to SLDS
             self.a_sigma = 1
             self.b_sigma = 0.01
         self.c = 100
@@ -232,6 +252,15 @@ class InfiniteHMM:
         self.z = np.zeros([self.nsolute, self.nT - self.order], dtype=int)  # will hold estimated states
 
         self.iteration = 0
+
+        self.convergence = dict()
+        self.convergence['A'] = []
+        self.convergence['invSigma'] = []
+        self.convergence['T'] = []
+        self.convergence['pi_init'] = []
+        self.convergence['mu'] = []
+
+        self.converged_params = dict()
 
     def _get_radial_distances(self, t, monomer, spline_params):
 
@@ -321,6 +350,7 @@ class InfiniteHMM:
 
         Nkdot = N.sum(axis=1)
         Mkdot = M.sum(axis=1)
+
         Nskdot = Ns.sum(axis=1)
         barK = sum(barM.sum(axis=0) > 0)
         validindices = np.where(Nkdot > 0)[0]
@@ -382,6 +412,7 @@ class InfiniteHMM:
 
         N = self.stateCounts['N']
         Ns = self.stateCounts['Ns']
+
         for j in range(self.max_states):
             # sample rows of transition matrix based on G0, counts and sticky parameter
             # Gj ~ DP(alpha, G0)  -- this is the hierarchical part. If it were Gj ~ DP(gamma, H) this wouldn't work
@@ -394,6 +425,9 @@ class InfiniteHMM:
 
         # self.pi_init = np.random.dirichlet(alpha0 * self.beta_vec + N[self.max_states, :])
         self.pi_init = random.randdirichlet(alpha0 * self.beta_vec + N[self.max_states, :])[:, 0]  # REMOVE
+
+        self.convergence['T'].append(self.pi_z.copy())
+        self.convergence['pi_init'].append(self.pi_init.copy())
 
     def _sample_theta(self):
         """ reproduction of sample_theta.m
@@ -449,8 +483,93 @@ class InfiniteHMM:
                     # sample a matrix normal distribution to get AR parameter estimates
                     A[:, :, kz, ks] = self.sample_from_matrix_normal(SyxSxxInv, sqrtSigma, cholinvSxx)
 
+            #print(np.linalg.inv(invSigma[..., 0, 0]))
+            #print(A[..., 0, 0])
             self.theta['invSigma'] = invSigma
             self.theta['A'] = A
+            self.convergence['A'].append(A.copy())
+            self.convergence['invSigma'].append(invSigma.copy())
+
+        elif self.prior == 'MNIW-N':
+
+            invSigma = self.theta['invSigma']
+            A = self.theta['A']
+            mu = self.theta['mu']
+
+            store_XX = self.Ustats['XX']
+            store_YX = self.Ustats['YX']
+            store_YY = self.Ustats['YY']
+            store_sumY = self.Ustats['sumY']
+            store_sumX = self.Ustats['sumX']
+
+            K = self.prior_params['K']
+            M = self.prior_params['M']
+            MK = M @ K  # @ symbol does matrix multiplication
+            MKM = MK @ M.T
+
+            mu0 = self.prior_params['mu0']
+            cholSigma0 = self.prior_params['cholSigma0']
+            Lambda0 = np.linalg.inv(self.prior_params['cholSigma0'].T @ self.prior_params['cholSigma0'])
+            theta0 = Lambda0 @ self.prior_params['mu0']
+
+            dimu = nu_delta.shape[0]
+
+            for kz in range(self.max_states):
+                for ks in range(self.Ks):
+
+                    if store_card[kz, ks] > 0:
+
+                        for n in range(self.prior_params['numIter']):
+
+                            Sxx = store_XX[:, :, kz, ks] + K
+                            Syx = store_YX[:, :, kz, ks] + MK - mu[:, kz, ks][:, np.newaxis] @ store_sumX[:, kz, ks][np.newaxis, :]
+
+                            Syy = store_YY[:, :, kz, ks] + MKM - \
+                                  mu[:, kz, ks][:, np.newaxis] @ store_sumY[:, kz, ks][np.newaxis, :] - \
+                                  store_sumY[:, kz, ks][:, np.newaxis] @ mu[:, kz, ks][np.newaxis, :] + \
+                                  store_card[kz, ks] * mu[:, kz, ks][:, np.newaxis] @ mu[:, kz, ks][np.newaxis, :]
+
+                            # https://stackoverflow.com/questions/1001634/array-division-translating-from-matlab-to-python
+                            SyxSxxInv = np.linalg.lstsq(Sxx.T, Syx.T, rcond=None)[0].T
+                            Sygx = Syy - SyxSxxInv @ Syx.T
+                            Sygx = (Sygx + Sygx.T) / 2
+
+                            # sample inverse wishart distribution to get covariance estimate
+                            sqrtSigma, sqrtinvSigma = random.randiwishart(Sygx + nu_delta, nu + store_card[kz, ks])
+
+                            invSigma[:, :, kz, ks] = sqrtinvSigma.T @ sqrtinvSigma
+
+                            cholinvSxx = np.linalg.cholesky(np.linalg.inv(Sxx)).T  # transposed to match MATLAB
+
+                            # sample a matrix normal distribution to get AR parameter estimates
+                            A[:, :, kz, ks] = self.sample_from_matrix_normal(SyxSxxInv, sqrtSigma, cholinvSxx)
+
+                            Sigma_n = np.linalg.inv(Lambda0 + store_card[kz, ks]*invSigma[:, :, kz, ks])
+                            a = store_sumY[:, kz, ks][:, np.newaxis] - A[:, :, kz, ks] @ store_sumX[:, kz, ks][:, np.newaxis]  # 2 x 1
+                            b = invSigma[:, :, kz, ks] @ a
+                            mu_n = Sigma_n @ (theta0[:, np.newaxis] + b)
+
+                            mu[:, kz, ks] = mu_n[:, 0] + (np.linalg.cholesky(Sigma_n) @ random.randomnormal(0, 1, dimu))
+
+                    else:
+
+                        # sample inverse wishart distribution to get covariance estimate
+                        sqrtSigma, sqrtinvSigma = random.randiwishart(nu_delta, nu)
+
+                        invSigma[:, :, kz, ks] = sqrtinvSigma.T @ sqrtinvSigma  # I guess sqrtinvSigma is cholesky decomp
+
+                        cholinvK = np.linalg.cholesky(np.linalg.inv(K)).T  # transposed to match MATLAB
+
+                        # sample a matrix normal distribution to get AR parameter estimates
+                        A[:, :, kz, ks] = self.sample_from_matrix_normal(M, sqrtSigma, cholinvK)
+
+                        mu[:, kz, ks] = mu0 + cholSigma0.T @ random.randomnormal(0, 1, dimu)
+
+            self.theta['invSigma'] = invSigma
+            self.theta['A'] = A
+            self.convergence['A'].append(A.copy())
+            self.convergence['invSigma'].append(invSigma.copy())
+            self.convergence['mu'].append(mu.copy())
 
     def inference(self, niter):
         """ Sample z and s sequences given data and transition distributions
@@ -496,6 +615,7 @@ class InfiniteHMM:
             s = np.zeros([int(blockSize.sum())], dtype=int)
 
             likelihood = self._compute_likelihood(i)
+
             partial_marg = self._backwards_message_vec(likelihood)
 
             # sample the state and sub-state sequences
@@ -505,6 +625,7 @@ class InfiniteHMM:
             for t in range(T):
 
                 if t == 0:
+
                     Pz = np.multiply(self.pi_init.T, partial_marg[:, 0])
                     obsInd = np.arange(0, blockEnd[0])
 
@@ -528,7 +649,7 @@ class InfiniteHMM:
                 for k in range(blockSize[t]):
 
                     if self.Ks > 1:
-                        print('Ks > 1 untested in sample_zs!')
+                        print('Ks > 1 untested in _sample_zs!')
                         Ps = np.multiply(self.pi_s[z[t], :], likelihood[z[t], :, obsInd[k]])
                         Ps = np.cumsum(Ps)
                         s[obsInd[k]] = (Ps[-1] * np.random.uniform() > Ps).sum()  # removed addition of 1
@@ -583,9 +704,6 @@ class InfiniteHMM:
                     unique_s_for_z = np.where(Ns[kz, :] > 0)[0]
                     for ks in unique_s_for_z:
                         obsInd = inds[i]['inds'][kz, ks][:inds[i]['tot'][kz, ks]].data - 1  # yuck
-                        # print(kz)
-                        # print(obsInd)
-                        # exit()
                         self.Ustats['XX'][:, :, kz, ks] += X[:, obsInd] @ X[:, obsInd].T
                         self.Ustats['YX'][:, :, kz, ks] += u[:, obsInd] @ X[:, obsInd].T
                         self.Ustats['YY'][:, :, kz, ks] += u[:, obsInd] @ u[:, obsInd].T
@@ -607,6 +725,7 @@ class InfiniteHMM:
         # sample M, where M(i, j) = number of tables in restaurant i served dish j
         alpha = self.beta_vec * np.ones([self.max_states, self.max_states]) * alpha0 + kappa0 * np.eye(self.max_states)
         alpha = np.vstack((alpha, alpha0 * self.beta_vec))
+
         M = self.randnumtable(alpha, N)
 
         barM, sum_w = self.sample_barM(M, self.beta_vec, rho0)
@@ -790,10 +909,84 @@ class InfiniteHMM:
 
             gammab = bb - sum(np.log(xx))
 
-            # alpha = np.random.gamma(gammaa) / gammab
+            #alpha = np.random.gamma(gammaa) / gammab
             alpha = (random.randomgamma(gammaa) / gammab)[0, 0]  # REMOVE
 
         return alpha
+
+    def _get_params(self, traj_no=0, equil=None):
+        """ Plot estimated state sequence. If true labels exist, compare those.
+        """
+
+        # Get data
+        estimated_states = self.z[traj_no, :]  # estimated state sequence
+
+        found_states = list(np.unique(estimated_states))  # all of the states that were identified
+
+        # Print estimate properties
+        block = tuple(np.meshgrid(found_states, found_states))
+        estimated_transition_matrix = self.pi_z[block].T
+
+        # normalize so rows sum to 1
+        for i in range(len(found_states)):
+            estimated_transition_matrix[i, :] /= estimated_transition_matrix[i, :].sum()
+
+        print('Found %d unique states' % len(found_states))
+
+        print('\nEstimated Transition Matrix:\n')
+        print(estimated_transition_matrix)
+
+        # s = int(round(estimated_states[275:1000].mean()))
+        # print(self.convergence['A'][-1][..., s, 0])
+
+        sigma = np.array(self.convergence['invSigma'])[..., found_states, 0]
+
+        # reorganize autoregressive parameter
+        A = np.zeros([sigma.shape[0], self.order, self.dimensions, self.dimensions, len(found_states)])
+
+        for r in range(self.order):
+            A[:, r, ...] = np.array(self.convergence['A'])[:, :, r*self.dimensions:(r+1)*self.dimensions, found_states, 0]
+
+        T = np.zeros([A.shape[0], len(found_states), len(found_states)])
+        for i in range(T.shape[0]):
+            T[i, ...] = self.convergence['T'][i][block].T
+            for j in range(len(found_states)):
+                T[i, j, :] /= T[i, j, :].sum()
+                sigma[i, ..., j] = np.linalg.inv(sigma[i, ..., j])
+
+        pi_init = np.array(self.convergence['pi_init'])[:, found_states]
+
+        if equil is None:  # an attempt to automatically detect when the AR parameters are equilibrated
+
+            equil = 0
+
+            for s in range(len(found_states)):
+                for u in range(self.dimensions):
+                    for x in range(self.dimensions):
+                        equils = []
+                        for r in range(self.order):
+                            equils.append(pymbar.timeseries.detectEquilibration(A[:, r, u, x, s])[0])
+                        equils.append(pymbar.timeseries.detectEquilibration(sigma[:, u, x, s])[0])
+                        if max(equils) > equil:
+                            equil = max(equils)
+
+        self.converged_params = dict(A=A[equil:, ...], sigma=sigma[equil:, ...], T=T[equil:, ...],
+                                     pi_init=pi_init[equil:, :])
+
+        if self.prior == 'MNIW-N':
+            self.converged_params['mu'] = np.array(self.convergence['mu'])[equil:, :, found_states, 0]
+
+        # Detect equilibration on transition matrix and initial state distribution vector
+        # for i in range(len(found_states)):
+        #     for j in range(len(found_states)):
+        #             equilT = pymbar.timeseries.detectEquilibration(T[:, i, j])[0]
+        #             if equilT > equil:
+        #                 equil = equilT
+        #     equil_pi = pymbar.timeseries.detectEquilibration(pi_init[:, i])[0]
+        #     if equil_pi > equil:
+        #         equil = equil_pi
+
+        print('\nAutoregressive parameters equilibrated after %d iterations' % equil)
 
     def summarize_results(self, cmap=plt.cm.jet, traj_no=0, plot_dim='all'):
         """ Plot estimated state sequence. If true labels exist, compare those.
@@ -805,6 +998,8 @@ class InfiniteHMM:
         shift = 1.5 * self.trajectories[:, traj_no, :].max()
 
         found_states = list(np.unique(estimated_states))
+        print(found_states)
+
         nT = len(estimated_states)
 
         state_counts = [list(estimated_states).count(s) for s in found_states]
@@ -837,12 +1032,12 @@ class InfiniteHMM:
         if self.labels is not None:
 
             actual_transition_matrix = self.actual_T
-            rms = np.sqrt(np.square(estimated_transition_matrix - actual_transition_matrix).mean())
-
-            print('\nActual Transition Matrix:\n')
-            print(actual_transition_matrix)
-
-            print('\nRoot mean squared error between estimated and true matrices: %.4f\n' % rms)
+            # rms = np.sqrt(np.square(estimated_transition_matrix - actual_transition_matrix).mean())
+            #
+            # print('\nActual Transition Matrix:\n')
+            # print(actual_transition_matrix)
+            #
+            # print('\nRoot mean squared error between estimated and true matrices: %.4f\n' % rms)
 
             # give extra states their own labels
             diff = len(found_states) - len(states)  # difference between no. of found states and actual no. of states
@@ -875,9 +1070,9 @@ class InfiniteHMM:
         colors = np.array([cmap(i) for i in np.random.choice(np.arange(cmap.N), size=len(found_states))])
 
         # for setting custom colors
-        from matplotlib import colors as mcolors
-        colors = np.array([mcolors.to_rgba(i) for i in
-                           ['xkcd:blue', 'xkcd:orange', 'xkcd:red', 'xkcd:green', 'xkcd:yellow', 'xkcd:violet']])
+        # from matplotlib import colors as mcolors
+        # colors = np.array([mcolors.to_rgba(i) for i in
+        #                    ['xkcd:blue', 'xkcd:orange', 'xkcd:red', 'xkcd:green', 'xkcd:yellow', 'xkcd:violet']])
         # colors = np.array([mcolors.to_rgba(i) for i in ['blue', 'blue', 'blue']])
 
         if self.labels is not None:
@@ -924,10 +1119,13 @@ class InfiniteHMM:
                                                                          + i * shift, z, colors))  # plot
 
             else:
+
                 y = self.com[(1 + self.order):, traj_no, i]
 
+                #ax_estimated[i].plot(np.arange(nT - 1) * self.dt / 1000, y)
+
                 ax_estimated[i].add_collection(
-                    multicolored_line_collection(np.arange(nT) * self.dt / 1000, y, z, colors))  # plot
+                    multicolored_line_collection(np.arange(nT - 1) * self.dt / 1000, y, z, colors))  # plot
 
                 ax_estimated[i].set_xlim([0, nT * self.dt / 1000])
                 ax_estimated[i].set_ylim([y.min(), y.max()])
@@ -969,7 +1167,10 @@ def organize_states(true_states, true_state_labels, found_states, estimated_stat
     if len(found_states) < len(true_state_labels):
         print('Less states were found than exist...adding a dummy state')
         for i in range(len(true_state_labels) - len(found_states)):
-            dummy = sum(found_states)  # add all the found states to get a unique dummy state label
+            #dummy = sum(found_states)  # add all the found states to get a unique dummy state label
+            dummy = 0
+            while dummy in found_states:
+                dummy += 1
             found_states.append(dummy)
             dummies.append(dummy)
 

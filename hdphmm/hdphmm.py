@@ -29,11 +29,46 @@ class ModelError(Exception):
         super().__init__(message)
 
 
+class PhantomState:
+    """ An object that parameterizes the phantom state used to link independent trajectories
+    """
+
+    def __init__(self, d, r, length=100, cov=None, A=None, mu=None):
+
+        self.params = dict()
+
+        if cov is None:
+            self.params['sigma'] = np.zeros([1, d, d, 1])
+        else:
+            self.params['sigma'] = cov
+
+        if A is None:
+            self.params['A'] = np.zeros([1, r, d, d, 1])
+        else:
+            self.params['A'] = A
+
+        if mu is None:
+            self.params['mu'] = np.zeros([1, d, 1])
+        else:
+            self.params['mu'] = mu
+
+        self.params['T'] = np.ones([1, 1, 1])
+        self.params['pi_init'] = np.ones([1])
+        self.length = length
+
+    def generate_trajectory(self):
+
+        traj_generator = gent.GenARData(params=self.params)
+        traj_generator.gen_trajectory(self.length, 1)
+
+        return traj_generator.traj
+
+
 class InfiniteHMM:
 
-    def __init__(self, data, observation_model='AR', prior='MNIW', order=1, max_states=20, dim=None, save_com=True,
+    def __init__(self, data, observation_model='AR', prior='MNIW-N', order=1, max_states=20, dim=None, save_com=True,
                  load_com=False, gro=None, res=None, difference=True, traj_no=None, radial=False,
-                 build_monomer='NAcarb11V', first_frame=0, **kwargs):
+                 build_monomer='NAcarb11V', first_frame=0, link=False, parameterize_each=False, **kwargs):
         """
         :param data: trajectories to analyze. If gro is not None, then this should be the name of a GROMACS trajectory \
          file (.xtc or .trr) TODO: describe what goes in this data structure
@@ -42,12 +77,20 @@ class InfiniteHMM:
         :param order: for AR observation model, autoregressive order of data (order = 1 would be Y_t = phi*Y_{t-1} + c)
         :param max_states: maximum number of states
         :param dim: limit calculation to a specified dimension(s) given by integer indices or a list of integer indices
-        :param gro: GROMACS coordinate file
-        :param res: name of residue
         :param save_com: If True and you are loading a GROMACS trajectory, save the center of mass coordinates for \
         quicker loading in future usage
+        :param load_com: load save center of mass trajectory. If True, you should be passing the pickled output from \
+        using the save_com option to data.
+        :param gro: GROMACS coordinate file
+        :param res: name of residue
+        :param difference: Take the first order difference of the timeseries
+        :param traj_no: If there are multiple trajectories, specify which of the trajectories to use
         :param radial: replace the x and y coordinates of a MD trajectory with a radial coordinate with respect to
         the pore centers of an HII phase lyotropic liquid crystal membrane.
+        :param build_monomer: name of monomer used to build membrane
+        :param first_frame: First frame of trajectory to analyze
+        :param link: link together multiple trajectories separated by a phantom state
+        :param parameterize_each: perform a separate parameterization for each independent trajectory
 
         :type data: str or object
         :type observation_model: str
@@ -55,11 +98,22 @@ class InfiniteHMM:
         :type order: int
         :type max_states: int
         :type dim: None, int or list of int
+        :type save_com: bool
+        :type load_com: bool
         :type gro: str
         :type res: str
-        :type save_com: bool
+        :type traj_no: list or int
         :type radial: bool
+        :type build_monomer: str
+        :type first_frame: int
+        :type link: bool
+        :type parameterize_each: bool
         """
+
+        self.observation_model = observation_model  # type of model (AR is the only option currently)
+        self.prior = prior  # prior for noise and autoregressive parameters (MNIW is only option currently)
+        self.order = order  # autoregressive order
+        self.max_states = max_states  # truncate infinte states possiblites down to something finite
 
         com = None
         if load_com:
@@ -116,8 +170,6 @@ class InfiniteHMM:
             else:
                 self.trajectories = self.com[..., dim]
 
-            print(self.trajectories.shape)
-
         elif isinstance(data, object):#gent.GenARData):
 
             self.trajectories = data.traj
@@ -137,6 +189,22 @@ class InfiniteHMM:
             self.trajectories = self.trajectories[:, traj_no, :]
             self.com = self.com[:, traj_no, :]
 
+        if link:
+
+            # currently only uses defaults. Can add functionality to allow new params
+            phantom_state = PhantomState(self.trajectories.shape[2], self.order)
+
+            linked_traj = self.trajectories[:, [0], :]
+            linked_com = self.com[:, [0], :]
+            for t in range(1, self.trajectories.shape[1]):
+                linked_traj = np.concatenate((linked_traj, phantom_state.generate_trajectory()))
+                linked_traj = np.concatenate((linked_traj, self.trajectories[:, [t], :]))
+                linked_com = np.concatenate((linked_com, phantom_state.generate_trajectory()))
+                linked_com = np.concatenate((linked_com, self.com[:, [t], :]))
+
+            self.trajectories = linked_traj
+            self.com = linked_com
+
         # determine data characteristics
         self.dimensions = self.trajectories.shape[2]
         self.nT = self.trajectories.shape[0]
@@ -144,11 +212,6 @@ class InfiniteHMM:
 
         print('Fitting %d %d dimensional trajectories assuming an autoregressive order of %d' %
               (self.nsolute, self.dimensions, order))
-
-        self.observation_model = observation_model  # type of model (AR is the only option currently)
-        self.prior = prior  # prior for noise and autoregressive parameters (MNIW is only option currently)
-        self.order = order  # autoregressive order
-        self.max_states = max_states  # truncate infinte states possiblites down to something finite
 
         K = np.linalg.inv(np.diag(0.1 * np.ones(self.dimensions * self.order)))  # approximate noise level of data
         self.meanSigma = np.eye(self.dimensions)
@@ -165,11 +228,29 @@ class InfiniteHMM:
 
         elif self.prior == 'MNIW-N':
 
-            self.sig0 = 5
-
             self.prior_params['M'] = np.zeros([self.dimensions, self.m])
             self.prior_params['K'] = K[:self.m, :self.m]
-            self.prior_params['mu0'] = np.zeros(self.dimensions)
+
+            if traj_no is None:
+
+                traj_no = np.arange(self.nsolute)
+
+            if len(traj_no) > 1:
+
+                for i in range(len(traj_no)):
+                    self.trajectories[:, i, :] -= self.trajectories.mean(axis=0)[i, :]  # np.zeros(self.dimensions)
+
+                self.prior_params['mu0'] = np.zeros([self.dimensions])
+
+                self.sig0 = np.zeros(self.dimensions)
+                for i in range(self.dimensions):
+                    self.sig0[i] = self.trajectories[..., i].flatten().std()
+
+            else:
+
+                self.prior_params['mu0'] = self.trajectories[:, 0, :].mean(axis=0)
+                self.sig0 = (self.trajectories[:, 0, :] - self.prior_params['mu0']).std(axis=0)
+
             self.prior_params['cholSigma0'] = np.linalg.cholesky(self.sig0 * np.eye(self.dimensions))
             self.prior_params['numIter'] = 50
 
@@ -261,6 +342,8 @@ class InfiniteHMM:
         self.convergence['mu'] = []
 
         self.converged_params = dict()
+
+        print(self.trajectories.shape)
 
     def _get_radial_distances(self, t, monomer, spline_params):
 
@@ -590,6 +673,8 @@ class InfiniteHMM:
             self._sample_distributions()
             self._sample_theta()
             self._sample_hyperparams()
+
+            #print(np.unique(self.z).shape)
 
     def _sample_zs(self):
         """ reproduction of sample_zs.m
@@ -1026,8 +1111,8 @@ class InfiniteHMM:
         for i in range(len(states)):
             estimated_transition_matrix[i, :] /= estimated_transition_matrix[i, :].sum()
 
-        print('\nEstimated Transition Matrix:\n')
-        print(estimated_transition_matrix)
+        # print('\nEstimated Transition Matrix:\n')
+        # print(estimated_transition_matrix)
 
         if self.labels is not None:
 
@@ -1070,9 +1155,11 @@ class InfiniteHMM:
         colors = np.array([cmap(i) for i in np.random.choice(np.arange(cmap.N), size=len(found_states))])
 
         # for setting custom colors
-        # from matplotlib import colors as mcolors
-        # colors = np.array([mcolors.to_rgba(i) for i in
-        #                    ['xkcd:blue', 'xkcd:orange', 'xkcd:red', 'xkcd:green', 'xkcd:yellow', 'xkcd:violet']])
+        from matplotlib import colors as mcolors
+        colors = np.array([mcolors.to_rgba(i) for i in
+                           ['xkcd:black', 'xkcd:orange', 'xkcd:red', 'xkcd:green', 'xkcd:gold', 'xkcd:violet',
+                            'xkcd:yellow', 'xkcd:brown', 'xkcd:navy', 'xkcd:pink', 'xkcd:lavender', 'xkcd:magenta',
+                           'xkcd:aqua', 'xkcd:silver', 'xkcd:purple', 'xkcd:blue']])
         # colors = np.array([mcolors.to_rgba(i) for i in ['blue', 'blue', 'blue']])
 
         if self.labels is not None:
@@ -1130,6 +1217,9 @@ class InfiniteHMM:
                 ax_estimated[i].set_xlim([0, nT * self.dt / 1000])
                 ax_estimated[i].set_ylim([y.min(), y.max()])
 
+                #ax_estimated[i].plot([0, 5000], [0, 0], '--', color='black', lw=2)
+                #ax[1].plot([0, 5000], [0, 0], '--', color='black', lw=2)
+
         if self.labels is not None:
             ax_estimated.set_title('Estimated State Sequence', fontsize=16)
             ax_estimated.set_xlim([0, nT * self.dt])
@@ -1146,7 +1236,11 @@ class InfiniteHMM:
             ax_estimated.set_xlabel('Time', fontsize=14)
         else:
             ax_estimated[0].set_title('Estimated State Sequence', fontsize=16)
-            ax_estimated[-1].set_xlabel('Time', fontsize=14)
+            ax_estimated[-1].set_xlabel('Time (ns)', fontsize=14)
+
+        ax_estimated[0].set_ylabel('r-coordinate', fontsize=14)
+        ax_estimated[1].set_ylabel('z-coordinate', fontsize=14)
+        plt.tick_params(labelsize=14)
 
         plt.tight_layout()
         plt.show()

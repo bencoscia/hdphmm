@@ -9,7 +9,7 @@ from matplotlib.collections import LineCollection
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from itertools import combinations, permutations
 from hdphmm import generate_timeseries as gent
-from hdphmm.utils import file_rw, physical_properties, random
+from hdphmm.utils import file_rw, physical_properties, random, timeseries
 import pymbar
 
 np.set_printoptions(precision=4, suppress=True)
@@ -249,7 +249,10 @@ class InfiniteHMM:
             else:
 
                 self.prior_params['mu0'] = self.trajectories[:, 0, :].mean(axis=0)
-                self.sig0 = (self.trajectories[:, 0, :] - self.prior_params['mu0']).std(axis=0)
+                self.sig0 = (self.trajectories[:, 0, :] - self.prior_params['mu0']).std(axis=0)  * 2
+
+                print(self.sig0)
+                print(self.prior_params['mu0'])
 
             self.prior_params['cholSigma0'] = np.linalg.cholesky(self.sig0 * np.eye(self.dimensions))
             self.prior_params['numIter'] = 50
@@ -266,7 +269,7 @@ class InfiniteHMM:
         self.a_alpha = 1
         self.b_alpha = 0.01
         self.a_gamma = 1  # global expected # of HMM states (affects \beta) -- TODO: play with this
-        self.b_gamma = 0.01
+        self.b_gamma = 0.1
         if self.Ks > 1:  # I think this only applies to SLDS
             self.a_sigma = 1
             self.b_sigma = 0.01
@@ -274,6 +277,10 @@ class InfiniteHMM:
         self.d = 1
         self.type = 'HDP'  # hierarchical dirichlet process.
         self.resample_kappa = True  # use the sticky model
+
+        if 'hyperparams' in kwargs:
+            if kwargs['hyperparams'] is not None:
+                self._override_hyperparameters(kwargs['hyperparams'])
 
         # things that initializeStructs.m does #
         if self.observation_model == 'AR':
@@ -340,10 +347,25 @@ class InfiniteHMM:
         self.convergence['T'] = []
         self.convergence['pi_init'] = []
         self.convergence['mu'] = []
+        self.convergence['kappa0'] = []
+        self.convergence['gamma0'] = []
+        self.found_states = None
+        self.clustered_state_sequence = None
+        self.clustered_parameters = None
 
         self.converged_params = dict()
 
         print(self.trajectories.shape)
+
+    def _override_hyperparameters(self, hyperparams):
+
+        if 'mu0' in hyperparams:
+            self.prior_params['mu0'] = hyperparams['mu0']
+
+        if self.prior == 'MNIW-N':
+            if 'sig0' in hyperparams:
+                self.sig0 = hyperparams['sig0']
+                self.prior_params['cholSigma0'] = np.linalg.cholesky(self.sig0 * np.eye(self.dimensions))
 
     def _get_radial_distances(self, t, monomer, spline_params):
 
@@ -467,7 +489,7 @@ class InfiniteHMM:
             A = self.c + sum_w.sum()
             B = self.d + M.sum() - sum_w.sum()
             # rho0 = np.random.beta(A, B)
-            rho0 = random.randdirichlet([A, B])[0]
+            rho0 = random.randdirichlet([A, B])[0][0]
 
         self.hyperparams['alpha0_p_kappa0'] = alpha0_p_kappa0
         self.hyperparams['sigma0'] = sigma0
@@ -511,6 +533,8 @@ class InfiniteHMM:
 
         self.convergence['T'].append(self.pi_z.copy())
         self.convergence['pi_init'].append(self.pi_init.copy())
+        self.convergence['kappa0'].append(kappa0)
+        self.convergence['gamma0'].append(gamma0)
 
     def _sample_theta(self):
         """ reproduction of sample_theta.m
@@ -999,79 +1023,162 @@ class InfiniteHMM:
 
         return alpha
 
-    def _get_params(self, traj_no=0, equil=None):
+    def _get_params(self, traj_no=0, equil=None, recalculate_mle=False):
         """ Plot estimated state sequence. If true labels exist, compare those.
         """
 
         # Get data
         estimated_states = self.z[traj_no, :]  # estimated state sequence
+        self.found_states = list(np.unique(estimated_states))  # all of the states that were identified
 
-        found_states = list(np.unique(estimated_states))  # all of the states that were identified
+        if recalculate_mle:
 
-        # Print estimate properties
-        block = tuple(np.meshgrid(found_states, found_states))
-        estimated_transition_matrix = self.pi_z[block].T
+            # get points at which state switches occur
+            switch_points = timeseries.switch_points(estimated_states)
 
-        # normalize so rows sum to 1
-        for i in range(len(found_states)):
-            estimated_transition_matrix[i, :] /= estimated_transition_matrix[i, :].sum()
+            sigma = np.zeros([1, self.dimensions, self.dimensions, switch_points.size])
+            A = np.zeros([1, self.order, self.dimensions, self.dimensions, switch_points.size])
 
-        print('Found %d unique states' % len(found_states))
+            # Loop through and calculate MLE VAR at for each segment
+            for i in range(switch_points.size - 1):
+                start = switch_points[i]
+                end = switch_points[i + 1]
+                print(end - start)
+                var = timeseries.VectorAutoRegression(self.trajectories[start:end, traj_no, :], self.order)
+                #if end - start > 100:
 
-        print('\nEstimated Transition Matrix:\n')
-        print(estimated_transition_matrix)
+                print(var.covariance)
+                print(var.phi, var.phi_std)
+                #exit()
 
-        # s = int(round(estimated_states[275:1000].mean()))
-        # print(self.convergence['A'][-1][..., s, 0])
+        else:
 
-        sigma = np.array(self.convergence['invSigma'])[..., found_states, 0]
+            found_states = list(np.unique(estimated_states))  # all of the states that were identified
 
-        # reorganize autoregressive parameter
-        A = np.zeros([sigma.shape[0], self.order, self.dimensions, self.dimensions, len(found_states)])
+            # Print estimate properties
+            block = tuple(np.meshgrid(self.found_states, self.found_states))
+            estimated_transition_matrix = self.pi_z[block].T
 
-        for r in range(self.order):
-            A[:, r, ...] = np.array(self.convergence['A'])[:, :, r*self.dimensions:(r+1)*self.dimensions, found_states, 0]
+            # normalize so rows sum to 1
+            for i in range(len(found_states)):
+                estimated_transition_matrix[i, :] /= estimated_transition_matrix[i, :].sum()
 
-        T = np.zeros([A.shape[0], len(found_states), len(found_states)])
-        for i in range(T.shape[0]):
-            T[i, ...] = self.convergence['T'][i][block].T
-            for j in range(len(found_states)):
-                T[i, j, :] /= T[i, j, :].sum()
-                sigma[i, ..., j] = np.linalg.inv(sigma[i, ..., j])
+            print('Found %d unique states' % len(self.found_states))
 
-        pi_init = np.array(self.convergence['pi_init'])[:, found_states]
+            print('\nEstimated Transition Matrix:\n')
+            print(estimated_transition_matrix)
 
-        if equil is None:  # an attempt to automatically detect when the AR parameters are equilibrated
+            # s = int(round(estimated_states[275:1000].mean()))
+            # print(self.convergence['A'][-1][..., s, 0])
 
-            equil = 0
+            sigma = np.array(self.convergence['invSigma'])[..., self.found_states, 0]
 
-            for s in range(len(found_states)):
-                for u in range(self.dimensions):
-                    for x in range(self.dimensions):
-                        equils = []
-                        for r in range(self.order):
-                            equils.append(pymbar.timeseries.detectEquilibration(A[:, r, u, x, s])[0])
-                        equils.append(pymbar.timeseries.detectEquilibration(sigma[:, u, x, s])[0])
-                        if max(equils) > equil:
-                            equil = max(equils)
+            # reorganize autoregressive parameter
+            A = np.zeros([sigma.shape[0], self.order, self.dimensions, self.dimensions, len(self.found_states)])
 
-        self.converged_params = dict(A=A[equil:, ...], sigma=sigma[equil:, ...], T=T[equil:, ...],
-                                     pi_init=pi_init[equil:, :])
+            for r in range(self.order):
+                A[:, r, ...] = np.array(self.convergence['A'])[:, :, r*self.dimensions:(r+1)*self.dimensions, self.found_states, 0]
 
-        if self.prior == 'MNIW-N':
-            self.converged_params['mu'] = np.array(self.convergence['mu'])[equil:, :, found_states, 0]
+            T = np.zeros([A.shape[0], len(self.found_states), len(self.found_states)])
+            for i in range(T.shape[0]):
+                T[i, ...] = self.convergence['T'][i][block].T
+                for j in range(len(self.found_states)):
+                    T[i, j, :] /= T[i, j, :].sum()
+                    sigma[i, ..., j] = np.linalg.inv(sigma[i, ..., j])
 
-        # Detect equilibration on transition matrix and initial state distribution vector
-        # for i in range(len(found_states)):
-        #     for j in range(len(found_states)):
-        #             equilT = pymbar.timeseries.detectEquilibration(T[:, i, j])[0]
-        #             if equilT > equil:
-        #                 equil = equilT
-        #     equil_pi = pymbar.timeseries.detectEquilibration(pi_init[:, i])[0]
-        #     if equil_pi > equil:
-        #         equil = equil_pi
+            pi_init = np.array(self.convergence['pi_init'])[:, self.found_states]
 
-        print('\nAutoregressive parameters equilibrated after %d iterations' % equil)
+            if equil is None:  # an attempt to automatically detect when the AR parameters are equilibrated
+
+                equil = 0
+
+                for s in range(len(self.found_states)):
+                    for u in range(self.dimensions):
+                        for x in range(self.dimensions):
+                            equils = []
+                            for r in range(self.order):
+                                equils.append(pymbar.timeseries.detectEquilibration(A[:, r, u, x, s])[0])
+                            equils.append(pymbar.timeseries.detectEquilibration(sigma[:, u, x, s])[0])
+                            if max(equils) > equil:
+                                equil = max(equils)
+
+            self.converged_params = dict(A=A[equil:, ...], sigma=sigma[equil:, ...], T=T[equil:, ...],
+                                         pi_init=pi_init[equil:, :])
+
+            if self.prior == 'MNIW-N':
+                self.converged_params['mu'] = np.array(self.convergence['mu'])[equil:, :, self.found_states, 0]
+
+            # Detect equilibration on transition matrix and initial state distribution vector
+            # for i in range(len(found_states)):
+            #     for j in range(len(found_states)):
+            #             equilT = pymbar.timeseries.detectEquilibration(T[:, i, j])[0]
+            #             if equilT > equil:
+            #                 equil = equilT
+            #     equil_pi = pymbar.timeseries.detectEquilibration(pi_init[:, i])[0]
+            #     if equil_pi > equil:
+            #         equil = equil_pi
+
+            print('\nAutoregressive parameters equilibrated after %d iterations' % equil)
+
+    def reassign_state_sequence(self, clusters, labels=None, traj_no=0):
+        """ Reassign the state sequence, update transition matrix and finalize parameters after parameter clustering
+
+        NOTE that applying this to more than one trajectory is implemented but not tested.
+
+        :param clusters: Cluster object from cluster.py
+        :param labels: if the Cluster object was created from multiple InfiniteHMM objects, specify the labels which
+        belong to the state sequence being reassigned. If None, it assumes len(clusters.labels) is equal to the number
+        of found states.
+
+        :type clusters: class
+        :type labels: NoneType or list
+        """
+
+        # map cluster numbers to state numbers.
+        # this mapping assumes that the clusters are ordered in the same way as the identified states.
+
+        if labels is None:
+            labels = clusters.labels
+
+        map_states = dict()
+        for i, label in enumerate(labels):
+            map_states[self.found_states[i]] = label
+
+        # reassign state sequence
+        self.clustered_state_sequence = np.zeros_like(self.z)
+        ntraj, nT = self.z.shape
+        for t in range(ntraj):
+            for i in range(nT):
+                self.clustered_state_sequence[t, i] = map_states[self.z[t, i]]
+
+        unique_labels = np.unique(clusters.labels)  # we need to include all labels in clusters.labels, not just those observed in this trajectory
+        count_matrix = np.zeros([unique_labels.size, unique_labels.size])
+
+        for frame in range(1, nT):  # start at frame 1. May need to truncate more as equilibration
+            transitioned_from = self.clustered_state_sequence[:, frame - 1]
+            transitioned_to = self.clustered_state_sequence[:, frame]
+            for pair in zip(transitioned_from, transitioned_to):
+                count_matrix[pair[0], pair[1]] += 1
+
+        #transition_matrix = (count_matrix.T / count_matrix.sum(axis=1)).T
+
+        A = np.zeros_like(self.converged_params['A'])[0, ..., :unique_labels.size]
+        sigma = np.zeros_like(self.converged_params['sigma'])[0, ..., :unique_labels.size]
+        A = []
+        sigma = []
+
+        for l in unique_labels:
+            ndx = [i for i, key in enumerate(map_states.keys()) if map_states[key] == l]
+            A.append(self.converged_params['A'][..., ndx].mean(axis=0))
+            sigma.append(self.converged_params['sigma'][..., ndx].mean(axis=0))
+
+        # initial state distribution
+        pi_init = np.zeros([unique_labels.size])
+        for t in range(self.clustered_state_sequence.shape[0]):
+            pi_init[self.clustered_state_sequence[t, 0]] += 1
+        pi_init /= pi_init.sum()  # normalize
+
+        self.clustered_parameters = dict(A=A, sigma=sigma, pi_init=pi_init, count_matrix=count_matrix)
 
     def summarize_results(self, cmap=plt.cm.jet, traj_no=0, plot_dim='all'):
         """ Plot estimated state sequence. If true labels exist, compare those.
@@ -1111,6 +1218,7 @@ class InfiniteHMM:
         for i in range(len(states)):
             estimated_transition_matrix[i, :] /= estimated_transition_matrix[i, :].sum()
 
+        print(np.diagonal(estimated_transition_matrix))
         # print('\nEstimated Transition Matrix:\n')
         # print(estimated_transition_matrix)
 
@@ -1155,11 +1263,11 @@ class InfiniteHMM:
         colors = np.array([cmap(i) for i in np.random.choice(np.arange(cmap.N), size=len(found_states))])
 
         # for setting custom colors
-        from matplotlib import colors as mcolors
-        colors = np.array([mcolors.to_rgba(i) for i in
-                           ['xkcd:black', 'xkcd:orange', 'xkcd:red', 'xkcd:green', 'xkcd:gold', 'xkcd:violet',
-                            'xkcd:yellow', 'xkcd:brown', 'xkcd:navy', 'xkcd:pink', 'xkcd:lavender', 'xkcd:magenta',
-                           'xkcd:aqua', 'xkcd:silver', 'xkcd:purple', 'xkcd:blue']])
+        # from matplotlib import colors as mcolors
+        # colors = np.array([mcolors.to_rgba(i) for i in
+        #                    ['xkcd:black', 'xkcd:orange', 'xkcd:red', 'xkcd:green', 'xkcd:gold', 'xkcd:violet',
+        #                     'xkcd:yellow', 'xkcd:brown', 'xkcd:navy', 'xkcd:pink', 'xkcd:lavender', 'xkcd:magenta',
+        #                    'xkcd:aqua', 'xkcd:silver', 'xkcd:purple', 'xkcd:blue']])
         # colors = np.array([mcolors.to_rgba(i) for i in ['blue', 'blue', 'blue']])
 
         if self.labels is not None:
@@ -1211,11 +1319,16 @@ class InfiniteHMM:
 
                 #ax_estimated[i].plot(np.arange(nT - 1) * self.dt / 1000, y)
 
-                ax_estimated[i].add_collection(
+                if dim > 1:
+                    ax = ax_estimated[i]
+                else:
+                    ax = ax_estimated
+
+                ax.add_collection(
                     multicolored_line_collection(np.arange(nT - 1) * self.dt / 1000, y, z, colors))  # plot
 
-                ax_estimated[i].set_xlim([0, nT * self.dt / 1000])
-                ax_estimated[i].set_ylim([y.min(), y.max()])
+                ax.set_xlim([0, nT * self.dt / 1000])
+                ax.set_ylim([y.min(), y.max()])
 
                 #ax_estimated[i].plot([0, 5000], [0, 0], '--', color='black', lw=2)
                 #ax[1].plot([0, 5000], [0, 0], '--', color='black', lw=2)
@@ -1235,11 +1348,26 @@ class InfiniteHMM:
             ax_estimated.tick_params(labelsize=14)
             ax_estimated.set_xlabel('Time', fontsize=14)
         else:
-            ax_estimated[0].set_title('Estimated State Sequence', fontsize=16)
-            ax_estimated[-1].set_xlabel('Time (ns)', fontsize=14)
 
-        ax_estimated[0].set_ylabel('r-coordinate', fontsize=14)
-        ax_estimated[1].set_ylabel('z-coordinate', fontsize=14)
+            if dim > 1:
+                ax1 = ax_estimated[0]
+                ax2 = ax_estimated[-1]
+            else:
+                ax1 = ax_estimated
+                ax2 = ax_estimated
+
+            ax1.set_title('Estimated State Sequence', fontsize=16)
+            ax2.set_xlabel('Time (ns)', fontsize=14)
+
+        if dim > 1:
+            ax1 = ax_estimated[0]
+            ax2 = ax_estimated[-1]
+        else:
+            ax1 = ax_estimated
+            ax2 = ax_estimated
+
+        ax1.set_ylabel('r-coordinate', fontsize=14)
+        ax2.set_ylabel('z-coordinate', fontsize=14)
         plt.tick_params(labelsize=14)
 
         plt.tight_layout()
@@ -1316,3 +1444,54 @@ def multicolored_line_collection(x, y, z, colors):
     lc.set_linewidth(2)
 
     return lc
+
+
+class ClusteredParameters:
+
+    def __init__(self, ihmm):
+
+        print('hello')
+
+
+def get_clustered_parameters(ihmm, clusters, order=1):
+    """ Combine data from multiple trajectories estimate clustered state parameters
+
+    :param ihmm: A single InfiniteHMM (not implemented) or a list containing instances of InfiniteHMM classes.
+    :param clusters: Cluster object
+    :param order: autoregressive order (only order 1 is implemented right now)
+
+    :type InfiniteHMM instance or list of InfiniteHMM instances
+    :type hdphmm.cluster.Cluster object
+    :type order: int
+
+    :return: dictionary of parameters
+    """
+
+    nclusters = clusters.nclusters
+
+    # need A, sigma, transition matrix, pi_init
+
+    A = [[] for n in range(nclusters)]
+    sigma = [[] for n in range(nclusters)]
+    count_matrix = np.zeros([nclusters, nclusters])
+    pi_init = np.zeros([nclusters])
+    for i, trajectory in enumerate(ihmm):  # loop through all of the trajectories
+        params = trajectory.clustered_parameters
+        for n in range(nclusters):
+            if i == 0:
+                A[n] = params['A'][n]
+                sigma[n] = params['sigma'][n]
+            else:
+                A[n] = np.concatenate((A[n], params['A'][n]), axis=-1)
+                sigma[n] = np.concatenate((sigma[n], params['sigma'][n]), axis=-1)
+
+        count_matrix += params['count_matrix']
+        pi_init += params['pi_init']
+
+    A = np.array([a.mean(axis=-1) for a in A])
+    sigma = np.array([s.mean(axis=-1) for s in sigma])
+
+    transition_matrix = (count_matrix.T / count_matrix.sum(axis=1)).T
+    pi_init = pi_init / pi_init.sum()
+
+    return dict(A=A, sigma=sigma, transition_matrix=transition_matrix, pi_init=pi_init)

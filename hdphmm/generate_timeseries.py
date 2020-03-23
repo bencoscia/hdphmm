@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from scipy.stats import norm
 import argparse
 import copy
+import tqdm
 
 
 def initialize():
@@ -167,21 +168,23 @@ class GenARData:
         T += np.random.uniform(0, high, size=(self.nstates, self.nstates))  # add random draws from uniform distribution
         self.T = T / T.sum(axis=1, keepdims=1)  # normalize so sum of rows is 1
 
-    def gen_trajectory(self, ndraws, ntraj, unbound_dimensions=None):
+    def gen_trajectory(self, ndraws, ntraj, unbound_dimensions=None, progress=True):
         """ Generate time series with chosen underlying dynamics
 
         :param ndraws: number of sequential points to generate
         :param ntraj: number of independent trajectories to generate
         :param unbound_dimensions: indices of dimensions whose mean should not be fixed.
+        :param progress: show progress bar
 
         :type ndraws: int
         :type ntraj: int
         :type unbound_dimensions: NoneType, list or np.ndarray
+        :type progress: bool
         """
 
         return self._gen_ar_hmm(ndraws, ntraj, unbound_dimensions=unbound_dimensions)
 
-    def _gen_ar_hmm(self, ndraws, ntraj, unbound_dimensions=None):
+    def _gen_ar_hmm(self, ndraws, ntraj, unbound_dimensions=None, progress=True):
         """ Generate a mean-zero autoregressive timeseries based on the transition matrix and autoregressive parameters.
         The timeseries is defined as:
 
@@ -199,10 +202,7 @@ class GenARData:
         self.state_sequence = np.zeros([ndraws, ntraj])
         self.traj = np.zeros([ndraws + self.order, ntraj, self.dim])
 
-        for n in range(ntraj):
-
-            #param_set_no = np.random.randint(self.T.shape[0])
-            param_set_no = 0
+        for n in tqdm.tqdm(range(ntraj), disable=(not progress)):
 
             mu = np.copy(self.mu)
 
@@ -212,19 +212,19 @@ class GenARData:
                 unconditional_mean = np.zeros([self.nstates, self.dim])
 
                 for s in range(self.nstates):
-                    sum_phi[s, ...] = np.eye(self.dim) - self.phis[param_set_no, ..., s].sum(axis=0)
-                    unconditional_mean[s, :] = np.linalg.inv(sum_phi[s, ...]) @ mu[param_set_no, ..., s]
+                    sum_phi[s, ...] = np.eye(self.dim) - self.phis[s, ...].sum(axis=0)
+                    unconditional_mean[s, :] = np.linalg.inv(sum_phi[s, ...]) @ mu[s, ...]
                     #print(unconditional_mean[s, :])  # , self.mu[param_set_no, ..., s])
 
             state = np.random.choice(self.state_labels)  # choose initial state with uniform probability
 
             for d in range(self.order, ndraws + self.order):
                 # choose state based on transition matrix
-                state = np.random.choice(self.state_labels, p=self.T[param_set_no, state, :])
+                state = np.random.choice(self.state_labels, p=self.T[state, :])
                 self.state_sequence[d - self.order, n] = state  # actual state labels for future comparison
 
                 # calculate autoregressive terms
-                self.traj[d, n, :] = sum([self.phis[param_set_no, i, ..., state] @ self.traj[d - (i + 1), n, :]
+                self.traj[d, n, :] = sum([self.phis[state, i, ...] @ self.traj[d - (i + 1), n, :]
                                           for i in range(self.order)])
 
                 # print(self.mu[param_set_no, ..., state])
@@ -239,7 +239,7 @@ class GenARData:
                                 mu_desired[i] = 0  # This is just to make all trajectories start at 0
                         # print(mu_desired)
                         # make it so that the unconditional mean of the VAR process is at the location of last state seg
-                        mu[param_set_no, ..., state] = sum_phi[state, ...] @ mu_desired
+                        mu[state, ...] = sum_phi[state, ...] @ mu_desired
                         # print(self.mu[param_set_no, ..., state])
 
                     elif state != self.state_sequence[d - self.order - 1, n]:  # only change mean when state switch occurs!
@@ -251,15 +251,14 @@ class GenARData:
                         # make it so that the unconditional mean of the VAR process is at the location of last state seg
                         # print(mu_desired)
                         # print('hi')
-                        mu[param_set_no, ..., state] = sum_phi[state, ...] @ mu_desired
+                        mu[state, ...] = sum_phi[state, ...] @ mu_desired
                         # print(self.mu[param_set_no, ..., state], self.traj[d - 1, n, i])
                         # exit()
                 # print(np.linalg.inv(sum_phi[state, ...]) @ self.mu[param_set_no, ..., state])
                 # exit()
                 #print(self.mu[param_set_no, ..., state])
                 # add Gaussian noise by drawing from multivariate normal distribution
-                self.traj[d, n, :] += np.random.multivariate_normal(mu[param_set_no, ..., state],
-                                                                    self.cov[param_set_no, ..., state])
+                self.traj[d, n, :] += np.random.multivariate_normal(mu[state, ...], self.cov[state, ...])
 
         self.traj = self.traj[self.order:, ...]
 

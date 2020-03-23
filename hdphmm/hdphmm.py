@@ -4,6 +4,7 @@ import numpy as np
 import mdtraj as md
 import tqdm
 from scipy import sparse
+from scipy.stats import mode
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from matplotlib.colors import ListedColormap, BoundaryNorm
@@ -68,7 +69,8 @@ class InfiniteHMM:
 
     def __init__(self, data, observation_model='AR', prior='MNIW-N', order=1, max_states=20, dim=None, save_com=True,
                  load_com=False, gro=None, res=None, difference=True, traj_no=None, radial=False,
-                 build_monomer='NAcarb11V', first_frame=0, link=False, parameterize_each=False, **kwargs):
+                 build_monomer='NAcarb11V', first_frame=0, link=False, parameterize_each=False, keep_xy=False,
+                 com_savename='com.pl', state_sequence=None, **kwargs):
         """
         :param data: trajectories to analyze. If gro is not None, then this should be the name of a GROMACS trajectory \
          file (.xtc or .trr) TODO: describe what goes in this data structure
@@ -91,6 +93,9 @@ class InfiniteHMM:
         :param first_frame: First frame of trajectory to analyze
         :param link: link together multiple trajectories separated by a phantom state
         :param parameterize_each: perform a separate parameterization for each independent trajectory
+        :param keep_xy: when parameterizing in terms of distance from pore center, keep radial coordinate in terms of \
+        xy.
+        :param com_savename: name by which to save center of mass trajectory if save_com is True
 
         :type data: str or object
         :type observation_model: str
@@ -108,6 +113,8 @@ class InfiniteHMM:
         :type first_frame: int
         :type link: bool
         :type parameterize_each: bool
+        :type keep_xy: bool
+        :type com_savename: str
         """
 
         self.observation_model = observation_model  # type of model (AR is the only option currently)
@@ -115,10 +122,17 @@ class InfiniteHMM:
         self.order = order  # autoregressive order
         self.max_states = max_states  # truncate infinte states possiblites down to something finite
 
+        self.fix_state_sequence = False
+        if state_sequence is not None:
+            self.fix_state_sequence = True
+
         com = None
         if load_com:
             com = file_rw.load_object(data)
             print('Loaded center-of-mass coordinates')
+
+        if isinstance(data, tuple):
+            com = data
 
         if isinstance(dim, int):  # this takes care of array shape issues
             dim = [dim]
@@ -129,18 +143,21 @@ class InfiniteHMM:
 
             if com is None:
 
-                print("Loading GROMACS trajectory file %s..." % data, end='', flush=True)
-                t = md.load(data, top=gro)[first_frame:]
-                print("Done!")
-
-                residue = physical_properties.Residue(res)  # get residue attributes
-
-                ndx = [a.index for a in t.topology.atoms if a.residue.name == res]  # index of all residue atoms
-                names = [a.name for a in t.topology.atoms if a.residue.name == res][
-                        :residue.natoms]  # names of atoms in one residue
-                mass = [residue.mass[x] for x in names]  # mass of atoms in order that they appear in file
-                print('Calculating center of mass trajectories of residue %s' % residue.name)
-                self.com = physical_properties.center_of_mass(t.xyz[:, ndx, :], mass)  # determine center of mass trajectories
+                # print("Loading GROMACS trajectory file %s..." % data, end='', flush=True)
+                # t = md.load(data, top=gro)[first_frame:]
+                # print("Done!")
+                #
+                # residue = physical_properties.Residue(res)  # get residue attributes
+                #
+                # ndx = [a.index for a in t.topology.atoms if a.residue.name == res]  # index of all residue atoms
+                # names = [a.name for a in t.topology.atoms if a.residue.name == res][
+                #         :residue.natoms]  # names of atoms in one residue
+                # mass = [residue.mass[x] for x in names]  # mass of atoms in order that they appear in file
+                # print('Calculating center of mass trajectories of residue %s' % residue.name)
+                # self.com = physical_properties.center_of_mass(t.xyz[:, ndx, :], mass)  # determine center of mass trajectories
+                t = None
+                com = file_rw.load_object('com.pl')
+                self.com = com[0]
 
                 if radial:
 
@@ -149,19 +166,32 @@ class InfiniteHMM:
                     except KeyError:
                         sp = {'npts_spline': 10, 'save': True, 'savename': 'spline.pl'}
 
-                    monomer = physical_properties.Residue(build_monomer)  # properties of monomer used to build system
-                    radial_distances = self._get_radial_distances(t, monomer, sp)
-                    self.com = np.concatenate((radial_distances[..., np.newaxis], self.com[..., 2][..., np.newaxis]), 2)
+                    #monomer = physical_properties.Residue(build_monomer)  # properties of monomer used to build system
+                    monomer = None
+                    radial_distances = self._get_radial_distances(t, monomer, sp, keep_xy=keep_xy)
 
-                self.dt = t.time[1] - t.time[0]
+                    if keep_xy:
+                        self.com = np.concatenate((radial_distances, self.com[..., 2][..., np.newaxis]), 2)
+                    else:
+                        self.com = np.concatenate(
+                            (radial_distances[..., np.newaxis], self.com[..., 2][..., np.newaxis]), 2)
+
+                #self.dt = t.time[1] - t.time[0]
+                self.dt = com[1]
 
                 if save_com:
-                    file_rw.save_object((self.com, self.dt), 'comr.pl')
+                    file_rw.save_object((self.com, self.dt), com_savename)
                     print('Saved center-of-mass coordinates')
 
             else:
+
                 self.com = com[0]
-                self.dt = com[1]
+                self.dt = com[1]  # time step in picoseconds
+
+                if radial and keep_xy:
+                    if self.com.shape[-1] != 3:
+                        raise Exception('I am assuming you are working in 3 dimensions. You say you want to keep the xy'
+                                        'coordinates but only gave a 2 dimensional center of mass array.')
 
             if difference:  # take first order difference
                 self.trajectories = self.com[1:, ...] - self.com[:-1, ...]
@@ -248,8 +278,13 @@ class InfiniteHMM:
 
             else:
 
-                self.prior_params['mu0'] = self.trajectories[:, 0, :].mean(axis=0)
-                self.sig0 = (self.trajectories[:, 0, :] - self.prior_params['mu0']).std(axis=0)  * 2
+                minmax = np.array([self.trajectories[:, 0, :].min(axis=0), self.trajectories[:, 0, :].max(axis=0)])
+
+                self.prior_params['mu0'] = minmax.mean(axis=0)
+                self.sig0 = (minmax[1, :] - self.prior_params['mu0']) / 2
+
+                # self.prior_params['mu0'] = self.trajectories[:, 0, :].mean(axis=0)
+                # self.sig0 = (self.trajectories[:, 0, :] - self.prior_params['mu0']).std(axis=0)  # * 2
 
                 print(self.sig0)
                 print(self.prior_params['mu0'])
@@ -339,6 +374,9 @@ class InfiniteHMM:
         self.s = np.zeros([self.nsolute, self.nT - self.order])
         self.z = np.zeros([self.nsolute, self.nT - self.order], dtype=int)  # will hold estimated states
 
+        if self.fix_state_sequence:
+            self.z = state_sequence
+
         self.iteration = 0
 
         self.convergence = dict()
@@ -355,9 +393,9 @@ class InfiniteHMM:
 
         self.converged_params = dict()
 
-        print(self.trajectories.shape)
-
     def _override_hyperparameters(self, hyperparams):
+
+        print(self.prior_params)
 
         if 'mu0' in hyperparams:
             self.prior_params['mu0'] = hyperparams['mu0']
@@ -367,27 +405,72 @@ class InfiniteHMM:
                 self.sig0 = hyperparams['sig0']
                 self.prior_params['cholSigma0'] = np.linalg.cholesky(self.sig0 * np.eye(self.dimensions))
 
-    def _get_radial_distances(self, t, monomer, spline_params):
+    def _get_radial_distances(self, t, monomer, spline_params, keep_xy=False):
 
-        pore_atoms = [a.index for a in t.topology.atoms if a.name in monomer.pore_defining_atoms and
-                      a.residue.name in monomer.residues]
+        # pore_atoms = [a.index for a in t.topology.atoms if a.name in monomer.pore_defining_atoms and
+        #               a.residue.name in monomer.residues]
 
-        spline = physical_properties.trace_pores(t.xyz[:, pore_atoms, :], t.unitcell_vectors,
+        # spline = physical_properties.trace_pores(t.xyz[:, pore_atoms, :], t.unitcell_vectors,
+        #               spline_params['npts_spline'], save=spline_params['save'], savename=spline_params['savename'])[0]
+        spline = physical_properties.trace_pores(None, None,
                       spline_params['npts_spline'], save=spline_params['save'], savename=spline_params['savename'])[0]
 
+        # nres = self.com.shape[1]
+        # if keep_xy:
+        #     radial_distances = np.zeros([t.n_frames, nres, 2])
+        # else:
+        #     radial_distances = np.zeros([t.n_frames, nres])
+        # npores = spline.shape[1]
+        # for f in tqdm.tqdm(range(t.n_frames), unit=' Frames'):
+        #     d = np.zeros([npores, nres])
+        #     for p in range(npores):
+        #         print(physical_properties.radial_distance_spline(spline[f, p, ...], self.com[f, ...],
+        #                                                    t.unitcell_vectors[f, ...], keep_xy=keep_xy))
+        #         break
+        #
+        #         d[p, :] = physical_properties.radial_distance_spline(spline[f, p, ...], self.com[f, ...],
+        #                                                              t.unitcell_vectors[f, ...], keep_xy=keep_xy)
+        #
+        #     radial_distances[f, :] = d[np.argmin(d, axis=0), np.arange(nres)]
+
+        nframes = self.com.shape[0]
         nres = self.com.shape[1]
-        radial_distances = np.zeros([t.n_frames, nres])
         npores = spline.shape[1]
-        for f in tqdm.tqdm(range(t.n_frames), unit=' Frames'):
-            d = np.zeros([npores, nres])
+
+        if keep_xy:
+            radial_distances = np.zeros([nframes, npores, nres, 2])
+        else:
+            radial_distances = np.zeros([nframes, npores, nres])
+
+        unitcell_vectors = file_rw.load_object('unitcell.pl')[2]
+        ndx = np.zeros([nframes, nres])
+        for f in tqdm.tqdm(range(nframes), unit=' Frames'):
+
+            if keep_xy:
+                d = np.zeros([npores, nres, 2])
+            else:
+                d = np.zeros([npores, nres])
+
             for p in range(npores):
 
-                d[p, :] = physical_properties.radial_distance_spline(spline[f, p, ...], self.com[f, ...],
-                                                                     t.unitcell_vectors[f, ...])
+                d[p, ...] = physical_properties.radial_distance_spline(spline[f, p, ...], self.com[f, ...],
+                                                                       unitcell_vectors[f, ...], keep_xy=keep_xy)
 
-            radial_distances[f, :] = d[np.argmin(d, axis=0), np.arange(nres)]
+            if keep_xy:
 
-        return radial_distances
+                r = np.zeros([npores, nres])
+                for p in range(npores):
+                    r[p, :] = np.linalg.norm(d[p, ...], axis=1)
+                ndx[f, :] = np.argmin(r, axis=0)
+                radial_distances[f, ...] = d
+            else:
+
+                ndx[f, :] = np.argmin(d, axis=0)
+                radial_distances[f, :] = d
+
+        modes = mode(ndx, axis=0)[0].astype(int)
+
+        return radial_distances[:, modes, np.arange(nres), ...][:, 0, ...]
 
     def make_design_matrix(self, observations):
         """ Create an (order*d , T) matrix of shifted observations. For each order create a trajectory shifted an
@@ -747,7 +830,11 @@ class InfiniteHMM:
 
                 # beam sampling
                 u = np.random.uniform()
-                z[t] = (Pz[-1] * u > Pz).sum()  # removed addition of 1. States named from 0
+
+                if self.fix_state_sequence:
+                    z[t] = self.z[i, t]
+                else:
+                    z[t] = (Pz[-1] * u > Pz).sum()  # removed addition of 1. States named from 0
 
                 # add state to state counts matrix
                 if t > 0:
@@ -769,6 +856,7 @@ class InfiniteHMM:
                     totSeq[z[t], s[obsInd[k]]] += 1
                     indSeq[totSeq[z[t], s[obsInd[k]]] - 1, z[t], s[obsInd[k]]] = obsInd[k] + 1
 
+            #if not self.fix_state_sequence:
             self.z[i, :] = z
             self.s[i, :] = s
 
@@ -1023,7 +1111,7 @@ class InfiniteHMM:
 
         return alpha
 
-    def _get_params(self, traj_no=0, equil=None, recalculate_mle=False):
+    def _get_params(self, traj_no=0, equil=None, recalculate_mle=False, quiet=True):
         """ Plot estimated state sequence. If true labels exist, compare those.
         """
 
@@ -1063,10 +1151,12 @@ class InfiniteHMM:
             for i in range(len(found_states)):
                 estimated_transition_matrix[i, :] /= estimated_transition_matrix[i, :].sum()
 
-            print('Found %d unique states' % len(self.found_states))
+            if not quiet:
 
-            print('\nEstimated Transition Matrix:\n')
-            print(estimated_transition_matrix)
+                print('Found %d unique states' % len(self.found_states))
+
+                print('\nEstimated Transition Matrix:\n')
+                print(estimated_transition_matrix)
 
             # s = int(round(estimated_states[275:1000].mean()))
             # print(self.convergence['A'][-1][..., s, 0])
@@ -1118,7 +1208,49 @@ class InfiniteHMM:
             #     if equil_pi > equil:
             #         equil = equil_pi
 
-            print('\nAutoregressive parameters equilibrated after %d iterations' % equil)
+            if not quiet:
+                print('\nAutoregressive parameters equilibrated after %d iterations' % equil)
+
+    def subtract_mean(self, traj_no=0, simple_mean=False):
+        """ Calculate MLE params of each segment independently and subtract mean
+
+        Currently only works for AR(1)
+
+        Try AR and just mean.
+
+        """
+
+        estimated_states = self.z[traj_no, :]  # estimated state sequence
+
+        # get points at which state switches occur
+        switch_points = timeseries.switch_points(estimated_states)
+
+        # sigma = np.zeros([1, self.dimensions, self.dimensions, switch_points.size])
+        # A = np.zeros([1, self.order, self.dimensions, self.dimensions, switch_points.size])
+
+        zeroed = np.zeros_like(self.trajectories[:, traj_no, :])
+
+        # Loop through and calculate MLE VAR at for each segment
+        for i in range(switch_points.size - 1):
+            start = switch_points[i]
+            end = switch_points[i + 1]
+            data = self.trajectories[start:end, traj_no, :]
+
+            if (end - start) <= 4 or simple_mean:  # I think 4 can be replaced by (self.order + 1) * data.shape[1]
+                # simple mean of data
+                mu = data.mean(axis=0)
+            else:
+                # unconditional mean of MLE VAR fit to data sequence
+                var = timeseries.VectorAutoRegression(self.trajectories[start:end, traj_no, :], self.order)
+                mu = np.linalg.inv(np.eye(2) - var.phi[0, ...]) @ var.mu
+
+            # if np.linalg.norm(mu) > 10:
+            #     print(data.size, data, mu)
+            #     zeroed[start:end] = data - var.mu
+            # else:
+            zeroed[start:end] = data - mu
+
+        return zeroed
 
     def reassign_state_sequence(self, clusters, labels=None, traj_no=0):
         """ Reassign the state sequence, update transition matrix and finalize parameters after parameter clustering
@@ -1303,6 +1435,7 @@ class InfiniteHMM:
         # exit()
         # self.dt = 0.5
         #ax_estimated.set_title('Estimated State Sequence', fontsize=16)
+
         for i in range(dim):
 
             if self.labels is not None:
@@ -1316,7 +1449,8 @@ class InfiniteHMM:
             else:
 
                 y = self.com[(1 + self.order):, traj_no, i]
-
+                print(y.shape)
+                print(nT)
                 #ax_estimated[i].plot(np.arange(nT - 1) * self.dt / 1000, y)
 
                 if dim > 1:

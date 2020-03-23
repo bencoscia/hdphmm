@@ -444,12 +444,13 @@ def put_in_box(pt, x_box, y_box, m, angle):
     return pt
 
 
-def radial_distance_spline(spline, com, box):
+def radial_distance_spline(spline, com, box, keep_xy=False, pbcbox=False):
     """ Calculate radial distance from pore center based on distance from center of mass to closest z point in spline
 
     :param spline: coordinates of spline for a single pore and frame
     :param com: atomic center of mass z-coordinates
     :param zbox: z box dimension (nm)
+    :param pbcbox: put all atoms inside box
 
     :type spline: np.ndarray [npts_spline, 3]
     :type com: np.ndarray [n_com, 3]
@@ -462,7 +463,8 @@ def radial_distance_spline(spline, com, box):
     edges[1:-1] = ((spline[1:, 2] - spline[:-1, 2]) / 2) + spline[:-1, 2]
     edges[-1] = box[2, 2]
 
-    com = wrap_box(com, box)
+    if pbcbox:
+        com = wrap_box(com, box)
     # while np.min(com[:, 2]) < 0 or np.max(com[:, 2]) > zbox:  # because cross-linked configurations can extend very far up and down
     #     com[:, 2] = np.where(com[:, 2] < 0, com[:, 2] + zbox, com[:, 2])
     #     com[:, 2] = np.where(com[:, 2] > zbox, com[:, 2] - zbox, com[:, 2])
@@ -473,7 +475,10 @@ def radial_distance_spline(spline, com, box):
     zbins = np.where(zbins == 0, zbins + 1, zbins)
     zbins = np.where(zbins == edges.size, zbins - 1, zbins)
 
-    return np.linalg.norm(com[:, :2] - spline[zbins - 1, :2], axis=1)
+    if keep_xy:
+        return com[:, :2] - spline[zbins - 1, :2]
+    else:
+        return np.linalg.norm(com[:, :2] - spline[zbins - 1, :2], axis=1)
 
 
 def trace_pores(pos, box, npoints, npores=4, progress=True, save=True, savename='spline.pl'):

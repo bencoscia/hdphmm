@@ -2,6 +2,8 @@
 
 import numpy as np
 from statsmodels.tsa.api import VAR
+import tqdm
+from multiprocessing import Pool
 
 
 class VectorAutoRegression:
@@ -110,3 +112,140 @@ def switch_points(sequence):
         return np.array([0] + switch_ndx)  # also add first frame
     else:
         return np.array(switch_ndx)
+
+
+def autocorrFFT(x):
+    """ Function used for fast calculation of mean squared displacement
+
+    :param x:
+    :return:
+    """
+
+    N = len(x)
+    F = np.fft.fft(x, n=2*N)  # 2*N because of zero-padding
+    PSD = F * F.conjugate()
+    res = np.fft.ifft(PSD)
+    res = (res[:N]).real   # now we have the autocorrelation in convention B
+    n = N*np.ones(N) - np.arange(0, N)  # divide res(m) by (N-m)
+
+    return res / n  # this is the autocorrelation in convention A
+
+
+def msd_fft(args):
+    """ Calculate msd using a fast fourier transform algorithm
+
+    :param x: trajectory of particle positions, equispaced in time
+    :param axis: axis along which to calculate msd ({x:0, y:1, z:2})
+
+    :type x: np.ndarray
+    :type axis: int
+
+    :return: msd as a function of time
+    """
+
+    x, axis = args
+
+    r = np.copy(x)
+    r = r[:, axis]
+
+    if len(r.shape) == 1:
+        r = r[:, np.newaxis]
+
+    N = len(r)
+    D = np.square(r).sum(axis=1)
+    D = np.append(D, 0)
+    S2 = sum([autocorrFFT(r[:, i]) for i in range(r.shape[1])])
+    Q = 2 * D.sum()
+    S1 = np.zeros(N)
+    for m in range(N):
+      Q = Q - D[m - 1] - D[N - m]
+      S1[m] = Q / (N - m)
+
+    return S1 - 2 * S2
+
+
+def msd(x, axis, ensemble=False, nt=1):
+    """ Calculate mean square displacement based on particle positions
+
+    :param x: particle positions
+    :param axis: axis along which you want MSD (0, 1, 2, [0, 1], [0, 2], [1, 2], [0, 1, 2])
+    :param ensemble: if True, calculate the ensemble MSD instead of the time-averaged MSD
+    :param nt: number of threads to run on
+
+    :type x: ndarray (n_frames, n_particles, 3)
+    :type axis: int or list of ints
+    :type ensemble: bool
+    :type nt: int
+
+    :return: MSD of each particle
+    """
+
+    frames = x.shape[0]  # number of trajectory frames
+    ntraj = x.shape[1]  # number of trajectories
+    MSD = np.zeros([frames, ntraj], dtype=float)  # a set of MSDs per particle
+
+    size = len(x[0, :, axis].shape)  # number of axes in array where MSDs will be calculate
+
+    if ensemble:
+
+        for n in range(ntraj):  # start at 1 since all row 0 will be all zeros
+            MSD[:, n] = ensemble_msd(x[0, n, axis], x[:, n, axis], size)
+
+    else:
+        if nt > 1:
+            with Pool(nt) as pool:
+                for i, t in enumerate(pool.map(msd_fft, [(x[:, n, :], axis) for n in range(ntraj)])):
+                    MSD[:, i] = t
+        else:
+            for n in tqdm.tqdm(range(ntraj)):
+                MSD[:, n] = msd_fft((x[:, n, :], axis))
+
+    return MSD
+
+
+def ensemble_msd(x0, x, size):
+
+    if size == 1:
+
+        return (x - x0) ** 2
+
+    else:
+
+        return np.linalg.norm(x0 - x, axis=1) ** 2
+
+
+def bootstrap_msd(msds, N, confidence=68):
+    """ Estimate error at each point in the MSD curve using bootstrapping
+
+    :param msds: mean squared discplacements to sample
+    :param N: number of bootstrap trials
+    :param confidence: percentile for error calculation
+
+    :type msds: np.ndarray
+    :type N: int
+    :type confidence: float
+    """
+
+    nT, nparticles = msds.shape
+
+    msd_average = msds.mean(axis=1)
+
+    eMSDs = np.zeros([nT, N], dtype=float)  # create n bootstrapped trajectories
+
+    print('Bootstrapping MSD curves...')
+    for b in tqdm.tqdm(range(N)):
+        indices = np.random.randint(0, nparticles, nparticles)  # randomly choose particles with replacement
+        for n in range(nparticles):
+            eMSDs[:, b] += msds[:, indices[n]]  # add the MSDs of a randomly selected particle
+        eMSDs[:, b] /= nparticles  # average the MSDs
+
+    lower_confidence = (100 - confidence) / 2
+    upper_confidence = 100 - lower_confidence
+
+    limits = np.zeros([2, nT], dtype=float)  # upper and lower bounds at each point along MSD curve
+    # determine error bound for each tau (out of n MSD's, use that for the error bars)
+    for t in range(nT):
+        limits[0, t] = np.abs(np.percentile(eMSDs[t, :], lower_confidence) - msd_average[t])
+        limits[1, t] = np.abs(np.percentile(eMSDs[t, :], upper_confidence) - msd_average[t])
+
+    return limits

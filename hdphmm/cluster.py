@@ -7,7 +7,7 @@ import numpy as np
 
 class Cluster:
 
-    def __init__(self, params, distance_threshold=2., eigs=False, means=False, algorithm='bayesian', ncomponents=10, max_iter=1500,
+    def __init__(self, params, distance_threshold=2., eigs=False, diags=False, means=False, algorithm='bayesian', ncomponents=10, max_iter=1500,
                  weight_concentration_prior_type='dirichlet_process', weight_concentration_prior=None,
                  mean_precision_prior=1, init_params='random'):
         """ Cluster like parameter sets
@@ -44,17 +44,23 @@ class Cluster:
         self.mean_precision_prior = mean_precision_prior
         self.init_params = init_params
         self.eigs = eigs
+        self.diags = diags
         self.nclusters = None
-
-        #print(params['mu'])
 
         if isinstance(params, dict):
 
-            A = self._flatten_A(params['A'])
-            sigma = self._flatten_sigma(params['sigma'])
+            A = None
+            sigma = None
+
+            if 'A' in params.keys():
+                A = self._flatten_A(params['A'])
+
+            if 'sigma' in params.keys():
+                sigma = self._flatten_sigma(params['sigma'])
 
             mu = None
             if 'mu' in params.keys():
+
                 mu = params['mu']
 
                 if len(mu.shape) == 1:
@@ -74,17 +80,34 @@ class Cluster:
 
             raise Exception('Input data type not recognized. Please pass a list or a dict.')
 
-        if len(A.shape) < 2:
-            A = A[:, np.newaxis]
-            sigma = sigma[:, np.newaxis]
+        if A is not None:
+            if len(A.shape) < 2:
+                A = A[:, np.newaxis]
 
-        self.X = np.concatenate((A, sigma), axis=1)
+            if sigma is not None:
+
+                if len(sigma.shape) < 2:
+                    sigma = sigma[:, np.newaxis]
+
+                self.X = np.concatenate((A, sigma), axis=1)
+            else:
+                self.X = A
+        elif sigma is not None:
+
+            if len(sigma.shape) < 2:
+                sigma = sigma[:, np.newaxis]
+
+            self.X = sigma
 
         if mu is not None:
-            self.X = np.concatenate((self.X, mu), axis=1)
+            if A is None and sigma is None:
+                self.X = mu
+            else:
+                self.X = np.concatenate((self.X, mu), axis=1)
 
-        self.X -= self.X.min(axis=0)
-        self.X /= self.X.max(axis=0)
+        if algorithm is 'agglomerative':
+            self.X -= self.X.min(axis=0)
+            self.X /= self.X.max(axis=0)
 
         self.labels = None
         self.clusters = None
@@ -122,7 +145,7 @@ class Cluster:
                                                 weight_concentration_prior_type=self.weight_concentration_prior_type,
                                                 weight_concentration_prior=self.gamma,
                                                 mean_precision_prior=self.mean_precision_prior,
-                                                init_params=self.init_params, verbose=1)
+                                                init_params=self.init_params, verbose=0)
 
     def _flatten_A(self, A):
 
@@ -132,6 +155,10 @@ class Cluster:
             eigs = np.linalg.eig(reordered)[0]  # eigenvalues of each matrix
 
             return eigs.real  # imaginary component usually very close to zero
+
+        elif self.diags:
+
+            return np.array([np.diag(A[..., a]) for a in range(A.shape[2])])
 
         else:
 
@@ -158,6 +185,10 @@ class Cluster:
             eigs = np.linalg.eig(reordered)[0]  # eigenvalues of each covariance matrix
 
             return eigs.real
+
+        elif self.diags:
+
+            return np.array([np.diag(sigma[..., s]) for s in range(sigma.shape[2])])
 
         else:
 

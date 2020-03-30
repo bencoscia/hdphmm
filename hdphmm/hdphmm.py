@@ -68,9 +68,9 @@ class PhantomState:
 class InfiniteHMM:
 
     def __init__(self, data, observation_model='AR', prior='MNIW-N', order=1, max_states=20, dim=None, save_com=True,
-                 load_com=False, gro=None, res=None, difference=True, traj_no=None, radial=False,
+                 load_com=False, gro=None, res='MET', difference=True, traj_no=None, radial=False,
                  build_monomer='NAcarb11V', first_frame=0, link=False, parameterize_each=False, keep_xy=False,
-                 com_savename='com.pl', state_sequence=None, **kwargs):
+                 com_savename='com.pl', state_sequence=None, save_every=1, **kwargs):
         """
         :param data: trajectories to analyze. If gro is not None, then this should be the name of a GROMACS trajectory \
          file (.xtc or .trr) TODO: describe what goes in this data structure
@@ -96,6 +96,7 @@ class InfiniteHMM:
         :param keep_xy: when parameterizing in terms of distance from pore center, keep radial coordinate in terms of \
         xy.
         :param com_savename: name by which to save center of mass trajectory if save_com is True
+        :param save_every: save parameter estimates every x number of frames
 
         :type data: str or object
         :type observation_model: str
@@ -115,12 +116,16 @@ class InfiniteHMM:
         :type parameterize_each: bool
         :type keep_xy: bool
         :type com_savename: str
+        :type save_every: int
         """
 
         self.observation_model = observation_model  # type of model (AR is the only option currently)
         self.prior = prior  # prior for noise and autoregressive parameters (MNIW is only option currently)
         self.order = order  # autoregressive order
         self.max_states = max_states  # truncate infinte states possiblites down to something finite
+        self.iter = 0  # iteration counter
+        self.save_every = save_every
+        self.res = res
 
         self.fix_state_sequence = False
         if state_sequence is not None:
@@ -156,7 +161,7 @@ class InfiniteHMM:
                 # print('Calculating center of mass trajectories of residue %s' % residue.name)
                 # self.com = physical_properties.center_of_mass(t.xyz[:, ndx, :], mass)  # determine center of mass trajectories
                 t = None
-                com = file_rw.load_object('com.pl')
+                com = file_rw.load_object('trajectories/com_%s.pl' % res)
                 self.com = com[0]
 
                 if radial:
@@ -303,7 +308,7 @@ class InfiniteHMM:
         # sticky HDP-HMM hyperparameter settings
         self.a_alpha = 1
         self.b_alpha = 0.01
-        self.a_gamma = 1  # global expected # of HMM states (affects \beta) -- TODO: play with this
+        self.a_gamma = 50  # global expected # of HMM states (affects \beta) -- TODO: play with this
         self.b_gamma = 0.1
         if self.Ks > 1:  # I think this only applies to SLDS
             self.a_sigma = 1
@@ -395,15 +400,25 @@ class InfiniteHMM:
 
     def _override_hyperparameters(self, hyperparams):
 
-        print(self.prior_params)
-
         if 'mu0' in hyperparams:
+            print('mu0 adjust from ', self.prior_params['mu0'], end='')
             self.prior_params['mu0'] = hyperparams['mu0']
+            print(' to ', self.prior_params['mu0'])
+
+        if 'a_gamma' in hyperparams:
+            self.a_gamma = hyperparams['a_gamma']
 
         if self.prior == 'MNIW-N':
             if 'sig0' in hyperparams:
                 self.sig0 = hyperparams['sig0']
                 self.prior_params['cholSigma0'] = np.linalg.cholesky(self.sig0 * np.eye(self.dimensions))
+
+            if 'scale_sig0' in hyperparams:
+                print('Sig0 adjusted from ', self.sig0, end='')
+                self.sig0 *= hyperparams['scale_sig0']
+                self.prior_params['cholSigma0'] = np.linalg.cholesky(self.sig0 * np.eye(self.dimensions))
+                print(' to ', self.sig0)
+
 
     def _get_radial_distances(self, t, monomer, spline_params, keep_xy=False):
 
@@ -442,7 +457,7 @@ class InfiniteHMM:
         else:
             radial_distances = np.zeros([nframes, npores, nres])
 
-        unitcell_vectors = file_rw.load_object('unitcell.pl')[2]
+        unitcell_vectors = file_rw.load_object('trajectories/unitcell_%s.pl' % self.res)
         ndx = np.zeros([nframes, nres])
         for f in tqdm.tqdm(range(nframes), unit=' Frames'):
 
@@ -614,10 +629,12 @@ class InfiniteHMM:
         # self.pi_init = np.random.dirichlet(alpha0 * self.beta_vec + N[self.max_states, :])
         self.pi_init = random.randdirichlet(alpha0 * self.beta_vec + N[self.max_states, :])[:, 0]  # REMOVE
 
-        self.convergence['T'].append(self.pi_z.copy())
-        self.convergence['pi_init'].append(self.pi_init.copy())
-        self.convergence['kappa0'].append(kappa0)
-        self.convergence['gamma0'].append(gamma0)
+        if self.iter % self.save_every == 0:
+
+            self.convergence['T'].append(self.pi_z.copy())
+            self.convergence['pi_init'].append(self.pi_init.copy())
+            self.convergence['kappa0'].append(kappa0)
+            self.convergence['gamma0'].append(gamma0)
 
     def _sample_theta(self):
         """ reproduction of sample_theta.m
@@ -677,8 +694,10 @@ class InfiniteHMM:
             #print(A[..., 0, 0])
             self.theta['invSigma'] = invSigma
             self.theta['A'] = A
-            self.convergence['A'].append(A.copy())
-            self.convergence['invSigma'].append(invSigma.copy())
+
+            if self.iter % self.save_every == 0:
+                self.convergence['A'].append(A.copy())
+                self.convergence['invSigma'].append(invSigma.copy())
 
         elif self.prior == 'MNIW-N':
 
@@ -757,9 +776,11 @@ class InfiniteHMM:
 
             self.theta['invSigma'] = invSigma
             self.theta['A'] = A
-            self.convergence['A'].append(A.copy())
-            self.convergence['invSigma'].append(invSigma.copy())
-            self.convergence['mu'].append(mu.copy())
+
+            if self.iter % self.save_every == 0:
+                self.convergence['A'].append(A.copy())
+                self.convergence['invSigma'].append(invSigma.copy())
+                self.convergence['mu'].append(mu.copy())
 
     def inference(self, niter):
         """ Sample z and s sequences given data and transition distributions
@@ -780,6 +801,7 @@ class InfiniteHMM:
             self._sample_distributions()
             self._sample_theta()
             self._sample_hyperparams()
+            self.iter += 1
 
             #print(np.unique(self.z).shape)
 
@@ -1162,6 +1184,7 @@ class InfiniteHMM:
             # print(self.convergence['A'][-1][..., s, 0])
 
             sigma = np.array(self.convergence['invSigma'])[..., self.found_states, 0]
+            # sigma = sigma[::self.save_every, ...]
 
             # reorganize autoregressive parameter
             A = np.zeros([sigma.shape[0], self.order, self.dimensions, self.dimensions, len(self.found_states)])
@@ -1322,7 +1345,6 @@ class InfiniteHMM:
         shift = 1.5 * self.trajectories[:, traj_no, :].max()
 
         found_states = list(np.unique(estimated_states))
-        print(found_states)
 
         nT = len(estimated_states)
 
@@ -1401,6 +1423,7 @@ class InfiniteHMM:
         #                     'xkcd:yellow', 'xkcd:brown', 'xkcd:navy', 'xkcd:pink', 'xkcd:lavender', 'xkcd:magenta',
         #                    'xkcd:aqua', 'xkcd:silver', 'xkcd:purple', 'xkcd:blue']])
         # colors = np.array([mcolors.to_rgba(i) for i in ['blue', 'blue', 'blue']])
+        # colors = np.array(['xkcd:blue', 'xkcd:orange', 'xkcd:gold', 'xkcd:red', 'xkcd:green', 'xkcd:magenta'])
 
         if self.labels is not None:
 
@@ -1409,6 +1432,7 @@ class InfiniteHMM:
             # plot true state sequence
             z = true_states
             for i in range(dim):
+
                 collection0 = multicolored_line_collection(np.arange(nT), self.trajectories[:, traj_no, i] + i * shift,
                                                            z, colors[:nstates, :])
                 ax[0].add_collection(collection0)  # plot
@@ -1448,9 +1472,11 @@ class InfiniteHMM:
 
             else:
 
-                y = self.com[(1 + self.order):, traj_no, i]
-                print(y.shape)
-                print(nT)
+                # y = self.com[(1 + self.order):, traj_no, i]
+                y = self.trajectories[:, traj_no, i]
+                # print(self.trajectories[:, traj_no, i].shape)
+                #
+                # print(nT)
                 #ax_estimated[i].plot(np.arange(nT - 1) * self.dt / 1000, y)
 
                 if dim > 1:
@@ -1459,7 +1485,7 @@ class InfiniteHMM:
                     ax = ax_estimated
 
                 ax.add_collection(
-                    multicolored_line_collection(np.arange(nT - 1) * self.dt / 1000, y, z, colors))  # plot
+                    multicolored_line_collection(np.arange(nT) * self.dt / 1000, y, z, colors))  # plot
 
                 ax.set_xlim([0, nT * self.dt / 1000])
                 ax.set_ylim([y.min(), y.max()])

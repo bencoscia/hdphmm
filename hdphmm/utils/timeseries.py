@@ -99,7 +99,13 @@ def switch_points(sequence):
     """
 
     # See https://stackoverflow.com/questions/36894822/how-do-i-identify-sequences-of-values-in-a-boolean-array
-    switch_ndx = np.argwhere(np.diff(sequence)).squeeze().tolist()
+    # if not isinstance(sequence, list):
+    #     if isinstance(sequence, np.ndarray):
+    #         sequence = sequence.tolist()
+    #
+    # sequence = [sequence[0]] + sequence
+
+    switch_ndx = (np.argwhere(np.diff(sequence)) + 1).squeeze().tolist()
 
     # add last frame as a switch point
     try:

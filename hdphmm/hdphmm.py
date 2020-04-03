@@ -457,7 +457,7 @@ class InfiniteHMM:
         else:
             radial_distances = np.zeros([nframes, npores, nres])
 
-        unitcell_vectors = file_rw.load_object('trajectories/unitcell_%s.pl' % self.res)
+        unitcell_vectors = file_rw.load_object('trajectories/unitcell_com_%s.pl' % self.res)
         ndx = np.zeros([nframes, nres])
         for f in tqdm.tqdm(range(nframes), unit=' Frames'):
 
@@ -467,7 +467,6 @@ class InfiniteHMM:
                 d = np.zeros([npores, nres])
 
             for p in range(npores):
-
                 d[p, ...] = physical_properties.radial_distance_spline(spline[f, p, ...], self.com[f, ...],
                                                                        unitcell_vectors[f, ...], keep_xy=keep_xy)
 
@@ -1275,14 +1274,14 @@ class InfiniteHMM:
 
         return zeroed
 
-    def reassign_state_sequence(self, clusters, labels=None, traj_no=0):
+    def reassign_state_sequence(self, clusters, labels=None):
         """ Reassign the state sequence, update transition matrix and finalize parameters after parameter clustering
 
         NOTE that applying this to more than one trajectory is implemented but not tested.
 
         :param clusters: Cluster object from cluster.py
-        :param labels: if the Cluster object was created from multiple InfiniteHMM objects, specify the labels which
-        belong to the state sequence being reassigned. If None, it assumes len(clusters.labels) is equal to the number
+        :param labels: if the Cluster object was created from multiple InfiniteHMM objects, specify the labels which \
+        belong to the state sequence being reassigned. If None, it assumes len(clusters.labels) is equal to the number\
         of found states.
 
         :type clusters: class
@@ -1306,34 +1305,34 @@ class InfiniteHMM:
             for i in range(nT):
                 self.clustered_state_sequence[t, i] = map_states[self.z[t, i]]
 
-        unique_labels = np.unique(clusters.labels)  # we need to include all labels in clusters.labels, not just those observed in this trajectory
-        count_matrix = np.zeros([unique_labels.size, unique_labels.size])
-
-        for frame in range(1, nT):  # start at frame 1. May need to truncate more as equilibration
-            transitioned_from = self.clustered_state_sequence[:, frame - 1]
-            transitioned_to = self.clustered_state_sequence[:, frame]
-            for pair in zip(transitioned_from, transitioned_to):
-                count_matrix[pair[0], pair[1]] += 1
-
-        #transition_matrix = (count_matrix.T / count_matrix.sum(axis=1)).T
-
-        A = np.zeros_like(self.converged_params['A'])[0, ..., :unique_labels.size]
-        sigma = np.zeros_like(self.converged_params['sigma'])[0, ..., :unique_labels.size]
-        A = []
-        sigma = []
-
-        for l in unique_labels:
-            ndx = [i for i, key in enumerate(map_states.keys()) if map_states[key] == l]
-            A.append(self.converged_params['A'][..., ndx].mean(axis=0))
-            sigma.append(self.converged_params['sigma'][..., ndx].mean(axis=0))
-
-        # initial state distribution
-        pi_init = np.zeros([unique_labels.size])
-        for t in range(self.clustered_state_sequence.shape[0]):
-            pi_init[self.clustered_state_sequence[t, 0]] += 1
-        pi_init /= pi_init.sum()  # normalize
-
-        self.clustered_parameters = dict(A=A, sigma=sigma, pi_init=pi_init, count_matrix=count_matrix)
+        # unique_labels = np.unique(clusters.labels)  # we need to include all labels in clusters.labels, not just those observed in this trajectory
+        # count_matrix = np.zeros([unique_labels.size, unique_labels.size])
+        #
+        # for frame in range(1, nT):  # start at frame 1. May need to truncate more as equilibration
+        #     transitioned_from = self.clustered_state_sequence[:, frame - 1]
+        #     transitioned_to = self.clustered_state_sequence[:, frame]
+        #     for pair in zip(transitioned_from, transitioned_to):
+        #         count_matrix[pair[0], pair[1]] += 1
+        #
+        # #transition_matrix = (count_matrix.T / count_matrix.sum(axis=1)).T
+        #
+        # A = np.zeros_like(self.converged_params['A'])[0, ..., :unique_labels.size]
+        # sigma = np.zeros_like(self.converged_params['sigma'])[0, ..., :unique_labels.size]
+        # A = []
+        # sigma = []
+        #
+        # for l in unique_labels:
+        #     ndx = [i for i, key in enumerate(map_states.keys()) if map_states[key] == l]
+        #     A.append(self.converged_params['A'][..., ndx].mean(axis=0))
+        #     sigma.append(self.converged_params['sigma'][..., ndx].mean(axis=0))
+        #
+        # # initial state distribution
+        # pi_init = np.zeros([unique_labels.size])
+        # for t in range(self.clustered_state_sequence.shape[0]):
+        #     pi_init[self.clustered_state_sequence[t, 0]] += 1
+        # pi_init /= pi_init.sum()  # normalize
+        #
+        # self.clustered_parameters = dict(A=A, sigma=sigma, pi_init=pi_init, count_matrix=count_matrix)
 
     def summarize_results(self, cmap=plt.cm.jet, traj_no=0, plot_dim='all'):
         """ Plot estimated state sequence. If true labels exist, compare those.
@@ -1579,7 +1578,7 @@ def organize_states(true_states, true_state_labels, found_states, estimated_stat
     return states
 
 
-def multicolored_line_collection(x, y, z, colors):
+def multicolored_line_collection(x, y, z, colors, lw=2):
     """ Color a 2D line based on which state it is in
 
     :param x: data x-axis values
@@ -1601,7 +1600,7 @@ def multicolored_line_collection(x, y, z, colors):
     # Set the values used for colormapping
     lc = LineCollection(segments, cmap=cmap, norm=norm)
     lc.set_array(z)
-    lc.set_linewidth(2)
+    lc.set_linewidth(lw)
 
     return lc
 

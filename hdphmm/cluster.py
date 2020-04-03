@@ -3,13 +3,14 @@
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.mixture import BayesianGaussianMixture
 import numpy as np
+from hdphmm.utils import stats
 
 
 class Cluster:
 
     def __init__(self, params, distance_threshold=2., eigs=False, diags=False, means=False, algorithm='bayesian', ncomponents=10, max_iter=1500,
                  weight_concentration_prior_type='dirichlet_process', weight_concentration_prior=None,
-                 mean_precision_prior=1, init_params='random'):
+                 mean_precision_prior=1, init_params='random', nclusters=None):
         """ Cluster like parameter sets
 
         NOTE this is only made for AR(1) at the moment.
@@ -35,7 +36,6 @@ class Cluster:
         except KeyError:
             raise Exception("Clustering algorithm, '%s', not implemented. Use either 'bayesian' or 'agglomerative'" % algorithm)
 
-        self.distance_threshold = distance_threshold
         self.means = means
         self.ncomponents = ncomponents
         self.max_iter = max_iter
@@ -45,7 +45,11 @@ class Cluster:
         self.init_params = init_params
         self.eigs = eigs
         self.diags = diags
-        self.nclusters = None
+        self.nclusters = nclusters
+        if self.nclusters is not None:
+            self.distance_threshold = None
+        else:
+            self.distance_threshold = distance_threshold
 
         if isinstance(params, dict):
 
@@ -65,6 +69,14 @@ class Cluster:
 
                 if len(mu.shape) == 1:
                     mu = mu[:, np.newaxis]
+
+            T = None
+            if 'T' in params.keys():
+
+                T = params['T']
+
+                if len(T.shape) == 1:
+                    T = T[:, np.newaxis]
 
         elif isinstance(params, list):
 
@@ -105,9 +117,22 @@ class Cluster:
             else:
                 self.X = np.concatenate((self.X, mu), axis=1)
 
+        if T is not None:
+            if A is None and sigma is None and mu is None:
+                self.X = T
+            else:
+                self.X = np.concatenate((self.X, T), axis=1)
+
         if algorithm is 'agglomerative':
-            self.X -= self.X.min(axis=0)
-            self.X /= self.X.max(axis=0)
+
+            for d in range(self.X.shape[1]):
+
+                outliers_removed = stats.remove_outliers(self.X[:, d])
+                # self.X[:, d] -= outliers_removed.min()
+                # self.X[:, d] /= outliers_removed.max()
+
+                self.X[:, d] -= outliers_removed.mean()
+                self.X[:, d] /= outliers_removed.std()
 
         self.labels = None
         self.clusters = None
@@ -137,7 +162,8 @@ class Cluster:
 
     def _agglomerative(self):
 
-         self.clusters = AgglomerativeClustering(n_clusters=None, distance_threshold=self.distance_threshold)
+         self.clusters = AgglomerativeClustering(n_clusters=self.nclusters, distance_threshold=self.distance_threshold,
+                                                 linkage='ward')
 
     def _bayesian(self):
 

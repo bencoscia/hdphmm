@@ -220,7 +220,7 @@ def ensemble_msd(x0, x, size):
         return np.linalg.norm(x0 - x, axis=1) ** 2
 
 
-def bootstrap_msd(msds, N, confidence=68):
+def bootstrap_msd(msds, N, confidence=68, median=False):
     """ Estimate error at each point in the MSD curve using bootstrapping
 
     :param msds: mean squared discplacements to sample
@@ -241,12 +241,32 @@ def bootstrap_msd(msds, N, confidence=68):
     print('Bootstrapping MSD curves...')
     for b in tqdm.tqdm(range(N)):
         indices = np.random.randint(0, nparticles, nparticles)  # randomly choose particles with replacement
-        for n in range(nparticles):
-            eMSDs[:, b] += msds[:, indices[n]]  # add the MSDs of a randomly selected particle
-        eMSDs[:, b] /= nparticles  # average the MSDs
+        if not median:
+            for n in range(nparticles):
+                eMSDs[:, b] += msds[:, indices[n]]  # add the MSDs of a randomly selected particle
+            eMSDs[:, b] /= nparticles  # average the MSDs
+        else:
+            final_msds = msds[2000, indices]
+            near_median = np.abs(final_msds - np.median(final_msds))
+            ordered_ndx = np.argsort(near_median)
+            eMSDs[:, b] = msds[:, ordered_ndx[0]]
+            # print(final_msds[ordered_ndx[0]])
+            # if near_median[ordered_ndx[0]] != 0:
+            #     eMSDs[:, b] = msds[:, ordered_ndx[:2]].mean(axis=1)
+            # else:
+            #     eMSDs[:, b] = msds[:, ordered_ndx[0]]
+
+    if median:
+
+        msd_average = eMSDs.mean(axis=1)
 
     lower_confidence = (100 - confidence) / 2
     upper_confidence = 100 - lower_confidence
+
+    # print(eMSDs[2000, :])
+    # print(np.percentile(eMSDs[2000, :], lower_confidence))
+    # print(np.percentile(eMSDs[2000, :], upper_confidence))
+    # print(msd_average[2000])
 
     limits = np.zeros([2, nT], dtype=float)  # upper and lower bounds at each point along MSD curve
     # determine error bound for each tau (out of n MSD's, use that for the error bars)
@@ -254,4 +274,25 @@ def bootstrap_msd(msds, N, confidence=68):
         limits[0, t] = np.abs(np.percentile(eMSDs[t, :], lower_confidence) - msd_average[t])
         limits[1, t] = np.abs(np.percentile(eMSDs[t, :], upper_confidence) - msd_average[t])
 
-    return limits
+    # print(limits[:, 2000])
+
+    return limits, msd_average
+
+
+def dwell(p, ntrials=1000):
+    """ Calculate the average length that a particle stays in the same state given a self-transition probability.
+    """
+
+    dwell_times = np.zeros(ntrials)
+
+    for t in range(ntrials):
+
+        cont = True
+        n = 0
+        while cont:
+            n += 1
+            cont = bool(np.random.choice([1, 0], p=[p, 1 - p]))
+
+        dwell_times[t] = n
+
+    return dwell_times.mean()

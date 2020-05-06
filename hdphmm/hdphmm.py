@@ -70,7 +70,7 @@ class InfiniteHMM:
     def __init__(self, data, observation_model='AR', prior='MNIW-N', order=1, max_states=20, dim=None, save_com=True,
                  load_com=False, gro=None, res='MET', difference=True, traj_no=None, radial=False,
                  build_monomer='NAcarb11V', first_frame=0, link=False, parameterize_each=False, keep_xy=False,
-                 com_savename='com.pl', state_sequence=None, save_every=1, **kwargs):
+                 com_savename='com.pl', state_sequence=None, seed_sequence=None, save_every=1, **kwargs):
         """
         :param data: trajectories to analyze. If gro is not None, then this should be the name of a GROMACS trajectory \
          file (.xtc or .trr) TODO: describe what goes in this data structure
@@ -130,6 +130,8 @@ class InfiniteHMM:
         self.fix_state_sequence = False
         if state_sequence is not None:
             self.fix_state_sequence = True
+
+        self.seed_sequence = seed_sequence
 
         com = None
         if load_com:
@@ -382,6 +384,9 @@ class InfiniteHMM:
         if self.fix_state_sequence:
             self.z = state_sequence
 
+        if self.seed_sequence is not None:
+            self.z = self.seed_sequence
+
         self.iteration = 0
 
         self.convergence = dict()
@@ -392,6 +397,7 @@ class InfiniteHMM:
         self.convergence['mu'] = []
         self.convergence['kappa0'] = []
         self.convergence['gamma0'] = []
+        self.convergence['nstates'] = []
         self.found_states = None
         self.clustered_state_sequence = None
         self.clustered_parameters = None
@@ -418,7 +424,6 @@ class InfiniteHMM:
                 self.sig0 *= hyperparams['scale_sig0']
                 self.prior_params['cholSigma0'] = np.linalg.cholesky(self.sig0 * np.eye(self.dimensions))
                 print(' to ', self.sig0)
-
 
     def _get_radial_distances(self, t, monomer, spline_params, keep_xy=False):
 
@@ -587,6 +592,8 @@ class InfiniteHMM:
             B = self.d + M.sum() - sum_w.sum()
             # rho0 = np.random.beta(A, B)
             rho0 = random.randdirichlet([A, B])[0][0]
+        else:
+            rho0 = 0
 
         self.hyperparams['alpha0_p_kappa0'] = alpha0_p_kappa0
         self.hyperparams['sigma0'] = sigma0
@@ -800,6 +807,7 @@ class InfiniteHMM:
             self._sample_distributions()
             self._sample_theta()
             self._sample_hyperparams()
+            self.convergence['nstates'].append(len(np.unique(self.z)))
             self.iter += 1
 
             #print(np.unique(self.z).shape)
@@ -853,6 +861,8 @@ class InfiniteHMM:
                 u = np.random.uniform()
 
                 if self.fix_state_sequence:
+                    z[t] = self.z[i, t]
+                elif self.seed_sequence is not None and self.iter == 0:
                     z[t] = self.z[i, t]
                 else:
                     z[t] = (Pz[-1] * u > Pz).sum()  # removed addition of 1. States named from 0
@@ -1233,7 +1243,7 @@ class InfiniteHMM:
             if not quiet:
                 print('\nAutoregressive parameters equilibrated after %d iterations' % equil)
 
-    def subtract_mean(self, traj_no=0, simple_mean=False):
+    def subtract_mean(self, traj_no=0, simple_mean=False, return_dwells_hops=False):
         """ Calculate MLE params of each segment independently and subtract mean
 
         Currently only works for AR(1)
@@ -1243,6 +1253,8 @@ class InfiniteHMM:
         """
 
         estimated_states = self.z[traj_no, :]  # estimated state sequence
+        dwells = []
+        hops = []
 
         # get points at which state switches occur
         switch_points = timeseries.switch_points(estimated_states)
@@ -1260,19 +1272,22 @@ class InfiniteHMM:
 
             if (end - start) <= 4 or simple_mean:  # I think 4 can be replaced by (self.order + 1) * data.shape[1]
                 # simple mean of data
+                if i > 0:
+                    hops.append(data.mean(axis=0) - mu)
+                dwells.append(end - start)
                 mu = data.mean(axis=0)
+
             else:
                 # unconditional mean of MLE VAR fit to data sequence
                 var = timeseries.VectorAutoRegression(self.trajectories[start:end, traj_no, :], self.order)
                 mu = np.linalg.inv(np.eye(2) - var.phi[0, ...]) @ var.mu
 
-            # if np.linalg.norm(mu) > 10:
-            #     print(data.size, data, mu)
-            #     zeroed[start:end] = data - var.mu
-            # else:
             zeroed[start:end] = data - mu
 
-        return zeroed
+        if return_dwells_hops:
+            return zeroed, dwells, hops
+        else:
+            return zeroed
 
     def reassign_state_sequence(self, clusters, labels=None):
         """ Reassign the state sequence, update transition matrix and finalize parameters after parameter clustering
@@ -1334,7 +1349,7 @@ class InfiniteHMM:
         #
         # self.clustered_parameters = dict(A=A, sigma=sigma, pi_init=pi_init, count_matrix=count_matrix)
 
-    def summarize_results(self, cmap=plt.cm.jet, traj_no=0, plot_dim='all'):
+    def summarize_results(self, cmap=plt.cm.jet, traj_no=0, plot_dim='all', savename=None):
         """ Plot estimated state sequence. If true labels exist, compare those.
         """
 
@@ -1413,7 +1428,13 @@ class InfiniteHMM:
         # Make a color-coded plot
 
         # randomly assign color values from colormap
-        colors = np.array([cmap(i) for i in np.random.choice(np.arange(cmap.N), size=len(found_states))])
+
+        #colors = np.array([cmap(i) for i in np.random.choice(np.arange(cmap.N), size=self.max_states)])
+        #shown_colors = np.array([cmap(i) for i in np.linspace(50, 225, len(found_states)).astype(int)])
+        colors = np.array([cmap(i) for i in np.linspace(50, 225, len(found_states)).astype(int)])
+
+        #colors = np.array([cmap(i) for i in np.linspace(50, 225, np.max(found_states) + 1).astype(int)])
+        #colors[found_states] = shown_colors
 
         # for setting custom colors
         # from matplotlib import colors as mcolors
@@ -1525,11 +1546,20 @@ class InfiniteHMM:
             ax1 = ax_estimated
             ax2 = ax_estimated
 
-        ax1.set_ylabel('r-coordinate', fontsize=14)
-        ax2.set_ylabel('z-coordinate', fontsize=14)
+        if dim == 2:
+            ax1.set_ylabel('r-coordinate', fontsize=14)
+            ax2.set_ylabel('z-coordinate', fontsize=14)
+        elif dim == 3:
+            ax_estimated[0].set_ylabel('z-coordinate', fontsize=14)
+            ax_estimated[1].set_ylabel('y-coordinate', fontsize=14)
+            ax_estimated[2].set_ylabel('x-coordinate', fontsize=14)
         plt.tick_params(labelsize=14)
 
         plt.tight_layout()
+
+        if savename is not None:
+            plt.savefig(savename)
+
         plt.show()
 
 

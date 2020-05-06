@@ -5,8 +5,14 @@ from LLC_Membranes.llclib import file_rw
 import numpy as np
 import matplotlib.pyplot as plt
 from hdphmm.cluster import Cluster
+import sys
 
-final_parameters = file_rw.load_object('saved_parameters/final_parameters_agglomerative_MET_diags_dtsigma0.25_dtA0.25.pl')
+try:
+    res = sys.argv[1]
+except IndexError:
+    res = 'MET'
+
+final_parameters = file_rw.load_object('saved_parameters/final_parameters_agglomerative_%s_diags_dtsigma0.25_dtA0.25.pl' %res)
 
 ihmmr = final_parameters['ihmmr']
 
@@ -47,44 +53,60 @@ for t in range(24):
 
 A_params = {'A': A}
 sig_params = {'sigma': sigma}
-
 eigs = False
 diags = True
 
-silhouette_avg = []
-silhouette_avg_A = []
-silhouette_avg_sig = []
+fig, ax = plt.subplots(2, 2, figsize=(11, 9))
+linkages = ['ward', 'average', 'complete', 'single']
 
-nclust = np.arange(2, 50)
+for i, linkage in enumerate(linkages):
 
-for n in nclust:
+    silhouette_avg = []
+    silhouette_avg_A = []
+    silhouette_avg_sig = []
+    silhouette_avg_mu = []
 
-    nclusters_sigma = n
-    nclusters_A = n
+    nclust = np.arange(2, 15)
 
-    algorithm = 'agglomerative'
+    for n in nclust:
 
-    cluster = Cluster({'A': A, 'sigma': sigma}, eigs=eigs, diags=diags, algorithm=algorithm, nclusters=n)
+        nclusters_sigma = n
+        nclusters_A = n
 
-    sig_cluster = Cluster(sig_params, eigs=eigs, diags=diags, algorithm=algorithm, nclusters=nclusters_sigma)
-    A_cluster = Cluster(A_params, eigs=eigs, diags=diags, algorithm=algorithm, nclusters=nclusters_A)
+        algorithm = 'agglomerative'
 
-    cluster.fit()
-    sig_cluster.fit()
-    A_cluster.fit()
+        #cluster = Cluster({'A': A, 'sigma': sigma}, eigs=eigs, diags=diags, algorithm=algorithm, nclusters=n)
+        
+        cluster_means = Cluster({'mu': mu[0,:]}, eigs=eigs, diags=diags, algorithm=algorithm, nclusters=n)
 
-    silhouette_avg.append(silhouette_score(cluster.X, cluster.labels))
-    silhouette_avg_sig.append(silhouette_score(sig_cluster.X, sig_cluster.labels))
-    silhouette_avg_A.append(silhouette_score(A_cluster.X, A_cluster.labels))
+        #sig_cluster = Cluster(sig_params, eigs=eigs, diags=diags, algorithm=algorithm, nclusters=nclusters_sigma, linkage=linkage)
+        #A_cluster = Cluster(A_params, eigs=eigs, diags=diags, algorithm=algorithm, nclusters=nclusters_A, linkage=linkage)
 
-#print(cluster.X)
-plt.plot(nclust, silhouette_avg_sig, lw=2, label='sigma only')   
-plt.plot(nclust, silhouette_avg_A, lw=2, label='A only') 
-plt.plot(nclust, silhouette_avg, lw=2, label='A, Sigma')
-plt.xlabel('Number of clusters', fontsize=14)
-plt.ylabel('Silhouette Score', fontsize=14)
-plt.ylim(0, 1)
-plt.tick_params(labelsize=14)
-plt.legend(fontsize=14)
+        #cluster.fit()
+        cluster_means.fit()
+        #sig_cluster.fit()
+        #A_cluster.fit()
+
+        #silhouette_avg.append(silhouette_score(cluster.X, cluster.labels))
+        #silhouette_avg_sig.append(silhouette_score(sig_cluster.X, sig_cluster.labels))
+        #silhouette_avg_A.append(silhouette_score(A_cluster.X, A_cluster.labels))
+        silhouette_avg_mu.append(silhouette_score(cluster_means.X, cluster_means.labels))
+
+    #print(cluster.X)
+    ax1 = i // 2
+    ax2 = i % 2
+
+    ax[ax1, ax2].set_title('%s' % linkage, fontsize=14)
+
+    ax[ax1, ax2].plot(nclust, silhouette_avg_mu, lw=2, label='$\mu$')
+    #ax[ax1, ax2].plot(nclust, silhouette_avg_sig, lw=2, label='sigma only')   
+    #ax[ax1, ax2].plot(nclust, silhouette_avg_A, lw=2, label='A only') 
+    #ax[ax1, ax2].plot(nclust, silhouette_avg, lw=2, label='A, Sigma')
+    ax[ax1, ax2].set_xlabel('Number of clusters', fontsize=14)
+    ax[ax1, ax2].set_ylabel('Silhouette Score', fontsize=14)
+    ax[ax1, ax2].set_ylim(0, 1)
+    ax[ax1, ax2].tick_params(labelsize=14)
+    ax[ax1, ax2].legend(fontsize=14)
+
 plt.tight_layout()
 plt.show()

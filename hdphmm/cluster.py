@@ -3,14 +3,15 @@
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.mixture import BayesianGaussianMixture
 import numpy as np
-from hdphmm.utils import stats
+from hdphmm.utils import stats, timeseries
+import tqdm
 
 
 class Cluster:
 
     def __init__(self, params, distance_threshold=2., eigs=False, diags=False, means=False, algorithm='bayesian', ncomponents=10, max_iter=1500,
                  weight_concentration_prior_type='dirichlet_process', weight_concentration_prior=None,
-                 mean_precision_prior=1, init_params='random', nclusters=None):
+                 mean_precision_prior=1, init_params='random', nclusters=None, linkage='ward'):
         """ Cluster like parameter sets
 
         NOTE this is only made for AR(1) at the moment.
@@ -51,32 +52,42 @@ class Cluster:
         else:
             self.distance_threshold = distance_threshold
 
+        self.linkage = linkage
+
         if isinstance(params, dict):
 
             A = None
             sigma = None
 
             if 'A' in params.keys():
-                A = self._flatten_A(params['A'])
+                A = self._flatten_A(np.copy(params['A']))
 
             if 'sigma' in params.keys():
-                sigma = self._flatten_sigma(params['sigma'])
+                sigma = self._flatten_sigma(np.copy(params['sigma']))
 
             mu = None
             if 'mu' in params.keys():
 
-                mu = params['mu']
+                mu = np.copy(params['mu'])
 
                 if len(mu.shape) == 1:
                     mu = mu[:, np.newaxis]
 
-            T = None
-            if 'T' in params.keys():
+            T_ = None
+            if 'T' in params.keys():  # This should already be in the form -log(1 - T)
 
-                T = params['T']
+                T_ = np.copy(params['T'])
 
-                if len(T.shape) == 1:
-                    T = T[:, np.newaxis]
+                if len(T_.shape) == 1:
+                    T_ = T_[:, np.newaxis]
+
+                # Note that these values should be transformed
+                # print(T_[:10, 0])
+                # T_[:, 0] = 1 / (1 - T_[:, 0])
+                # print(T_[:10, 0])
+
+                # for i, t in tqdm.tqdm(enumerate(T)):
+                #     T[i] = timeseries.dwell(t[0], ntrials=100)
 
         elif isinstance(params, list):
 
@@ -117,22 +128,23 @@ class Cluster:
             else:
                 self.X = np.concatenate((self.X, mu), axis=1)
 
-        if T is not None:
+        if T_ is not None:
             if A is None and sigma is None and mu is None:
-                self.X = T
+                self.X = T_
             else:
-                self.X = np.concatenate((self.X, T), axis=1)
+                self.X = np.concatenate((self.X, T_), axis=1)
 
         if algorithm is 'agglomerative':
 
             for d in range(self.X.shape[1]):
 
                 outliers_removed = stats.remove_outliers(self.X[:, d])
-                # self.X[:, d] -= outliers_removed.min()
-                # self.X[:, d] /= outliers_removed.max()
-
-                self.X[:, d] -= outliers_removed.mean()
-                self.X[:, d] /= outliers_removed.std()
+                # outliers_removed = np.copy(self.X[:, d])
+                # print(outliers_removed.size)
+                self.X[:, d] -= outliers_removed.min()
+                self.X[:, d] /= outliers_removed.max()
+                # self.X[:, d] -= outliers_removed.mean()
+                # self.X[:, d] /= outliers_removed.std()
 
         self.labels = None
         self.clusters = None
@@ -163,7 +175,7 @@ class Cluster:
     def _agglomerative(self):
 
          self.clusters = AgglomerativeClustering(n_clusters=self.nclusters, distance_threshold=self.distance_threshold,
-                                                 linkage='ward')
+                                                 linkage=self.linkage)
 
     def _bayesian(self):
 

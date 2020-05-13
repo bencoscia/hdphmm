@@ -11,7 +11,7 @@ class Cluster:
 
     def __init__(self, params, distance_threshold=2., eigs=False, diags=False, means=False, algorithm='bayesian', ncomponents=10, max_iter=1500,
                  weight_concentration_prior_type='dirichlet_process', weight_concentration_prior=None,
-                 mean_precision_prior=1, init_params='random', nclusters=None, linkage='ward'):
+                 mean_precision_prior=1, init_params='random', nclusters=None, linkage='ward', convert_rz=False):
         """ Cluster like parameter sets
 
         NOTE this is only made for AR(1) at the moment.
@@ -47,6 +47,8 @@ class Cluster:
         self.eigs = eigs
         self.diags = diags
         self.nclusters = nclusters
+        self.convert_rz = convert_rz
+
         if self.nclusters is not None:
             self.distance_threshold = None
         else:
@@ -141,10 +143,10 @@ class Cluster:
                 outliers_removed = stats.remove_outliers(self.X[:, d])
                 # outliers_removed = np.copy(self.X[:, d])
                 # print(outliers_removed.size)
-                self.X[:, d] -= outliers_removed.min()
-                self.X[:, d] /= outliers_removed.max()
-                # self.X[:, d] -= outliers_removed.mean()
-                # self.X[:, d] /= outliers_removed.std()
+                # self.X[:, d] -= outliers_removed.min()
+                # self.X[:, d] /= outliers_removed.max()
+                self.X[:, d] -= outliers_removed.mean()
+                self.X[:, d] /= outliers_removed.std()
 
         self.labels = None
         self.clusters = None
@@ -190,9 +192,13 @@ class Cluster:
         if self.eigs:
 
             reordered = np.moveaxis(A, -1, 0)#[:, 0, ...]  # reorder axes of A
-            eigs = np.linalg.eig(reordered)[0]  # eigenvalues of each matrix
+            eigs = np.linalg.eig(reordered)[0].real  # eigenvalues of each matrix
 
-            return eigs.real  # imaginary component usually very close to zero
+            if self.convert_rz:
+
+                eigs = np.concatenate((np.square(eigs[:, :2]).sum(axis=1)[:, np.newaxis], eigs[:, [2]]), axis=1)
+
+            return eigs  # imaginary component usually very close to zero
 
         elif self.diags:
 
@@ -220,7 +226,11 @@ class Cluster:
         if self.eigs:
 
             reordered = np.moveaxis(sigma, -1, 0)  # reorder axes for use with np.linalg.eig
-            eigs = np.linalg.eig(reordered)[0]  # eigenvalues of each covariance matrix
+            eigs = np.linalg.eig(reordered)[0].real  # eigenvalues of each covariance matrix
+
+            if self.convert_rz:
+
+                eigs = np.concatenate((eigs[:, :2].sum(axis=1)[:, np.newaxis], eigs[:, [2]]), axis=1)
 
             return eigs.real
 

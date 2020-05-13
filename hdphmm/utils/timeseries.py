@@ -170,7 +170,7 @@ def msd_fft(args):
     return S1 - 2 * S2
 
 
-def msd(x, axis, ensemble=False, nt=1):
+def msd(x, axis, ensemble=False, nt=1, progress=True):
     """ Calculate mean square displacement based on particle positions
 
     :param x: particle positions
@@ -199,11 +199,12 @@ def msd(x, axis, ensemble=False, nt=1):
 
     else:
         if nt > 1:
+
             with Pool(nt) as pool:
                 for i, t in enumerate(pool.map(msd_fft, [(x[:, n, :], axis) for n in range(ntraj)])):
                     MSD[:, i] = t
         else:
-            for n in tqdm.tqdm(range(ntraj)):
+            for n in tqdm.tqdm(range(ntraj), disable=(not progress)):
                 MSD[:, n] = msd_fft((x[:, n, :], axis))
 
     return MSD

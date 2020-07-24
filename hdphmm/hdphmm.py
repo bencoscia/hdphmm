@@ -1350,7 +1350,8 @@ class InfiniteHMM:
         #
         # self.clustered_parameters = dict(A=A, sigma=sigma, pi_init=pi_init, count_matrix=count_matrix)
 
-    def summarize_results(self, cmap=plt.cm.jet, traj_no=0, plot_dim='all', savename=None):
+    def summarize_results(self, cmap=plt.cm.jet, traj_no=0, plot_dim='all', savename=None, shuffle=False,
+                          crange=(50, 225)):
         """ Plot estimated state sequence. If true labels exist, compare those.
         """
 
@@ -1432,7 +1433,10 @@ class InfiniteHMM:
 
         #colors = np.array([cmap(i) for i in np.random.choice(np.arange(cmap.N), size=self.max_states)])
         #shown_colors = np.array([cmap(i) for i in np.linspace(50, 225, len(found_states)).astype(int)])
-        colors = np.array([cmap(i) for i in np.linspace(50, 225, len(found_states)).astype(int)])
+        colors = np.array([cmap(i) for i in np.linspace(crange[0], crange[1], len(found_states)).astype(int)])
+
+        if shuffle:
+            np.random.shuffle(colors)
 
         #colors = np.array([cmap(i) for i in np.linspace(50, 225, np.max(found_states) + 1).astype(int)])
         #colors[found_states] = shown_colors

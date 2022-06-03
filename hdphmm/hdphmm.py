@@ -1544,22 +1544,22 @@ class InfiniteHMM:
             ax1.set_title('Estimated State Sequence', fontsize=16)
             ax2.set_xlabel('Time (ns)', fontsize=14)
 
-        if dim > 1:
-            ax1 = ax_estimated[0]
-            ax2 = ax_estimated[-1]
-        else:
-            ax1 = ax_estimated
-            ax2 = ax_estimated
+            # if dim > 1:
+            #     ax1 = ax_estimated[0]
+            #     ax2 = ax_estimated[-1]
+            # else:
+            #     ax1 = ax_estimated
+            #     ax2 = ax_estimated
 
-        if dim == 2:
-            ax1.set_ylabel('r-coordinate', fontsize=14)
-            ax2.set_ylabel('z-coordinate', fontsize=14)
-        elif dim == 3:
-            ax_estimated[0].set_ylabel('x-coordinate', fontsize=14)
-            ax_estimated[1].set_ylabel('y-coordinate', fontsize=14)
-            ax_estimated[2].set_ylabel('z-coordinate', fontsize=14)
+            if dim == 2:
+                ax1.set_ylabel('r-coordinate', fontsize=14)
+                ax2.set_ylabel('z-coordinate', fontsize=14)
+            elif dim == 3:
+                ax_estimated[0].set_ylabel('x-coordinate', fontsize=14)
+                ax_estimated[1].set_ylabel('y-coordinate', fontsize=14)
+                ax_estimated[2].set_ylabel('z-coordinate', fontsize=14)
+
         plt.tick_params(labelsize=14)
-
         plt.tight_layout()
 
         if savename is not None:

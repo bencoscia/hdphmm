@@ -123,6 +123,8 @@ class GenARData:
                 self.nstates = nstates
                 self.generate_transition_matrix(slip)
 
+            self.pi_init = np.ones(self.nstates) * (1/self.nstates)
+
             self.phis = np.zeros([self.nstates, order, dim, dim])
 
             if phis is not None:
@@ -137,13 +139,13 @@ class GenARData:
                 # I'm not sure what the stabilty rules are for the multidimensional case
                 self.phis = np.zeros([1, order, dim, dim, self.nstates])
                 for s in range(self.nstates):
-                    self.phis[0, s, ...] = generate_ar_parameters(order, dim)
+                    self.phis[0, ..., s] = generate_ar_parameters(order, dim)
 
             self.cov = np.zeros([self.nstates, dim, dim])
             if cov is None:
                 for s in range(self.nstates):
                     A = np.random.uniform(0, stdmax, size=(dim, dim))
-                    self.cov[0, ..., s] = A @ A.T
+                    self.cov[s, ...] = A @ A.T
             else:
                 for s in range(self.nstates):
                     self.cov[s, ...] = np.array(cov[s]).reshape(dim, dim)
@@ -409,6 +411,8 @@ class GenARData:
 
                 state_sequence = state_no * np.ones([ndraws], dtype=int)
 
+            self.state_sequence[:, n] = state_sequence
+
             switch_points = ts.switch_points(state_sequence)
             states = state_sequence[switch_points[:-1]]
 
@@ -468,6 +472,7 @@ class GenARData:
                 # plt.show()
 
                 mu = self.traj[(tot_steps + self.order - 1), n, :]
+                mu = np.zeros_like(mu)
 
         self.traj = self.traj[self.order:, ...]
         #self.traj -= self.traj[0, ...]
